@@ -1,0 +1,41 @@
+{
+  "name": "api-server",
+  "version": "1.0.0",
+  "description": "REST API server for running scripts and sending Firebase push notifications",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write ."
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@polymarket/clob-client-v2": "^1.2.1",
+    "compression": "^1.8.2",
+    "cors": "^2.8.6",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.4",
+    "firebase-admin": "^14.5.1",
+    "helmet": "^8.3.0",
+    "pino": "^10.4.0",
+    "pino-http": "^11.0.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.14.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.14.0",
+    "pino-pretty": "^13.2.0",
+    "prettier": "^3.10.1"
+  },
+  "overrides": {
+    "ws": "^8.21.0"
+  }
+}
