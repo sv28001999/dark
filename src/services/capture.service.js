@@ -1,6 +1,7 @@
 import firebase from '../config/firebase.js';
 import logger from '../config/logger.js';
 import { EVENT_OUTCOME } from '../constants/status.js';
+import * as notificationService from './notification.service.js';
 import * as polymarketService from './polymarket.service.js';
 
 // Polymarket's "Bitcoin Up or Down - 5 minute" events start every 5 minutes, on multiples of
@@ -19,6 +20,8 @@ const LIST_SIZE = 20; // records returned per group by getRecords
 const TICK_MS = 5_000; // how often the capture loop runs
 const OUTCOME_DELAY_SECONDS = 60; // start looking for an event's outcome 1 minute after it ends
 const OUTCOME_GIVE_UP_SECONDS = 15 * 60; // store UNKNOWN if still unresolved 15 minutes after it ends
+// Notify all devices when a group's DOWN streak reaches 3 ("more than 2"), and again on every DOWN after that.
+const DOWN_STREAK_ALERT = 3;
 
 // Gamma returns some list fields as JSON strings, e.g. outcomes: '["Up", "Down"]'.
 function parseList(value) {
@@ -129,6 +132,7 @@ const capture = {
   pending: new Set(), // events whose outcome still has to be collected
   busy: false, // a tick is in progress
   startedAt: null, // when the running loop was started (ISO string), null when stopped
+  alerted: { odd: null, even: null }, // the last DOWN streak notified per group, so it isn't sent twice
 };
 let starting = null; // a start in progress, shared by concurrent start calls
 
@@ -179,6 +183,37 @@ async function collectOutcomes(now) {
   for (const { eventTime, outcome } of saved) {
     capture.pending.delete(eventTime);
     logger.info(`Capture: event ${eventTime} (${groupOf(eventTime)}) outcome ${outcome}`);
+  }
+  await alertDownStreaks(new Set(saved.map(({ eventTime }) => groupOf(eventTime))));
+}
+
+/**
+ * For each group that just got an outcome: if its latest outcomes are DOWN at least DOWN_STREAK_ALERT times
+ * in a row, sends a push notification to all registered devices ("Odd: 3 DOWN in a row"). Failures are logged,
+ * not thrown, so they never stop the capture loop.
+ */
+async function alertDownStreaks(groups) {
+  for (const group of groups) {
+    try {
+      const records = completed(await readGroup(group, { orderBy: '$key', limitToLast: LIST_SIZE + 5 }));
+      const count = streak(records, EVENT_OUTCOME.DOWN);
+      const alert = `${records.at(-1)?.eventTime}:${count}`; // the same streak and length is only sent once
+      if (count < DOWN_STREAK_ALERT || capture.alerted[group] === alert) continue;
+      capture.alerted[group] = alert;
+
+      const name = group === 'odd' ? 'Odd' : 'Even';
+      await notificationService.sendToAllDevices(
+        {
+          title: `${name}: ${count} DOWN in a row`,
+          body: `The last ${count} ${group} events ended DOWN.`,
+          data: { type: 'down-streak', group, count: String(count) }, // FCM data values must be strings
+        },
+        { source: `capture:${group}` },
+      );
+      logger.info(`Capture: ${group} DOWN streak ${count}, notified all devices`);
+    } catch (err) {
+      logger.warn({ err }, `Capture: could not send the ${group} DOWN streak notification`);
+    }
   }
 }
 
@@ -315,6 +350,14 @@ export async function cleanupRecords() {
 
 // ── Records ────────────────────────────────────────────────────────────────────────────────────
 
+/** The latest 20 records with an outcome (UP or DOWN), oldest first, with the fields the API returns. */
+function completed(records) {
+  return records
+    .filter((record) => isFinal(record.outcome))
+    .slice(-LIST_SIZE)
+    .map(({ eventTime, slug, outcome }) => ({ eventTime, slug, outcome }));
+}
+
 /** How many records in a row, counting back from the newest, have this outcome (0 if the newest doesn't). */
 function streak(records, outcome) {
   let count = 0;
@@ -332,12 +375,6 @@ export async function getRecords() {
     // A few extra: the newest records (event in progress, outcome not collected yet) have no outcome.
     ...GROUPS.map((group) => readGroup(group, { orderBy: '$key', limitToLast: LIST_SIZE + 5 })),
   ]);
-
-  const completed = (records) =>
-    records
-      .filter((record) => isFinal(record.outcome))
-      .slice(-LIST_SIZE)
-      .map(({ eventTime, slug, outcome }) => ({ eventTime, slug, outcome }));
 
   const oddRecords = completed(odd);
   const evenRecords = completed(even);

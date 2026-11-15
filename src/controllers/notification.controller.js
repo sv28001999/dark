@@ -1,7 +1,14 @@
+import { NOTIFICATION_STATUS } from '../constants/status.js';
 import * as notificationService from '../services/notification.service.js';
 import { sendSuccess } from '../utils/apiResponse.js';
 import validateRequest from '../utils/validateRequest.js';
 import * as notificationValidation from '../validations/notification.validation.js';
+
+const SEND_RESULT_MESSAGES = {
+  [NOTIFICATION_STATUS.SENT]: 'Notification sent',
+  [NOTIFICATION_STATUS.FAILED]: 'Notification could not be sent',
+  [NOTIFICATION_STATUS.LOGGED]: 'Notification logged, not sent (FIREBASE_SERVICE_ACCOUNT is not set)',
+};
 
 export async function sendNotification(req, res) {
   const { body } = validateRequest(req, notificationValidation.sendNotification);
@@ -9,7 +16,7 @@ export async function sendNotification(req, res) {
 
   sendSuccess(res, {
     statusCode: 201,
-    message: 'Notification logged (sending is not implemented yet)',
+    message: SEND_RESULT_MESSAGES[notification.status],
     data: { notification },
   });
 }

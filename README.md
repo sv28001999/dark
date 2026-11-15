@@ -6,8 +6,9 @@ A layered REST API built with **Node.js and Express 5**, written in plain JavaSc
   (UP/DOWN) in Firebase, split into an odd and an even group, and reports streaks.
 - **Runs scripts**: you put Node.js scripts in `scripts/`, and the API runs them in the background and records
   their status and output.
-- **Notifications**: the notification endpoints validate and record notifications, but **sending is not
-  implemented yet**. Notifications are written to the server log.
+- **Push notifications**: sends notifications to the mobile app through Firebase Cloud Messaging (FCM), including
+  an alert to every registered device when the odd or even group has 3 or more DOWN outcomes in a row. Needs
+  `FIREBASE_SERVICE_ACCOUNT`; without it, notifications are only written to the server log.
 
 > **Storage**: everything is stored in a Firebase Realtime Database, accessed through its public URL (REST API,
 > no credentials). That means the database rules allow anyone with the URL to read and write it.
@@ -24,7 +25,8 @@ A layered REST API built with **Node.js and Express 5**, written in plain JavaSc
 │   ├── config/
 │   │   ├── index.js             # Loads + validates environment variables (fails fast on bad config)
 │   │   ├── firebase.js          # Firebase Realtime Database REST client (get/put/patch/delete)
-│   │   ├── database.js          # Save/read runs and notifications in Firebase
+│   │   ├── database.js          # Save/read runs, notifications and devices in Firebase
+│   │   ├── fcm.js               # Firebase Cloud Messaging (HTTP v1) client for push notifications
 │   │   └── logger.js            # pino logger (pretty in dev, JSON in prod)
 │   ├── constants/status.js      # Run, notification and event-outcome statuses
 │   ├── routes/
@@ -34,14 +36,16 @@ A layered REST API built with **Node.js and Express 5**, written in plain JavaSc
 │   │       ├── capture.routes.js
 │   │       ├── script.routes.js
 │   │       ├── run.routes.js
-│   │       └── notification.routes.js
+│   │       ├── notification.routes.js
+│   │       └── device.routes.js
 │   ├── validations/             # Zod schemas per endpoint
 │   ├── controllers/             # HTTP layer: validate request, call service, send response
 │   ├── services/                # Business logic (no req/res here)
-│   │   ├── capture.service.js       # BTC Up/Down capture loop, odd/even records, streaks
+│   │   ├── capture.service.js       # BTC Up/Down capture loop, odd/even records, streaks, DOWN streak alerts
 │   │   ├── polymarket.service.js    # Calls to the Polymarket APIs
 │   │   ├── script.service.js        # Starts/cancels script processes, records results
-│   │   └── notification.service.js  # Records notifications (sending not implemented)
+│   │   ├── notification.service.js  # Sends push notifications through FCM and records them
+│   │   └── device.service.js        # Push tokens of the devices the mobile app is installed on
 │   └── utils/                   # ApiError, response helper, validateRequest
 └── scripts/                     # Your runnable scripts (example.js included)
 ```
@@ -95,9 +99,10 @@ npm run dev             # starts with auto-reload on http://localhost:3000
 | GET    | `/api/v1/runs?limit=20`                 | Recent runs, newest first                                     |
 | GET    | `/api/v1/runs/:runId`                   | One run: status, exit code, output, duration                  |
 | POST   | `/api/v1/runs/:runId/cancel`            | Stop a running script                                         |
-| POST   | `/api/v1/notifications`                 | Record a notification (logged, not sent)                      |
+| POST   | `/api/v1/notifications`                 | Send a push notification and record it                        |
 | GET    | `/api/v1/notifications?limit=20`        | Recent notifications, newest first                            |
 | GET    | `/api/v1/notifications/:notificationId` | One notification                                              |
+| POST   | `/api/v1/devices`                       | Register a device's push token (called by the mobile app)     |
 
 ### Capture: start, stop, records
 
@@ -142,6 +147,27 @@ while capturing.
   that outcome. For `UP, DOWN, DOWN, UP, DOWN, DOWN, DOWN` the DOWN count is 3 and the UP count 0.
 - `last20Outcomes`: the latest 20 outcomes of both groups together, oldest first.
 
+**DOWN streak alerts.** Each time the loop saves an outcome, it recounts that group's DOWN streak. When it is 3 or
+more, every registered device gets a push notification, e.g. "Odd: 3 DOWN in a row", and again at 4, 5 and so on,
+until an UP breaks the streak. The data payload is `{ type: "down-streak", group: "odd", count: "3" }`.
+
+### Push notifications
+
+Notifications are sent through Firebase Cloud Messaging (FCM), to the Android notification channel `alerts`
+that the mobile app creates. To enable sending:
+
+1. In the Firebase console, open **Project settings → Service accounts → Generate new private key**.
+2. Set `FIREBASE_SERVICE_ACCOUNT` to the downloaded file's contents (see [.env.example](.env.example)). Keep it
+   secret: anyone with it can send notifications to your app's users.
+
+Without it, notifications are written to the server log and saved with status `logged`. Otherwise the status is
+`sent` (FCM accepted it for at least one target) or `failed`, with `sentCount`, `failedCount` and FCM's `errors`.
+
+**`POST /api/v1/devices`** with `{ "token": "<FCM registration token>", "platform": "android" }` registers a
+device. The mobile app calls it on every launch once notification permission is granted; registering the same
+token again just updates it. Devices are stored at `devices/<id>` in Firebase, and removed automatically when FCM
+reports their token as unregistered (for example, the app was uninstalled).
+
 ### Run a script
 
 ```http
@@ -157,7 +183,7 @@ Content-Type: application/json
 Both fields are optional. A request with no body is fine.
 
 - `args`: strings passed to the script as command-line arguments.
-- `notify`: record a notification when the script finishes. Give exactly one of `token`, `tokens` or `topic`.
+- `notify`: send a push notification when the script finishes. Give exactly one of `token`, `tokens` or `topic`.
   `when` is `always` (default), `success` or `failure`.
 
 The response is `202 Accepted` with the run (`status: "running"`). Poll `GET /api/v1/runs/:runId` to follow it.
@@ -179,4 +205,4 @@ Files starting with `_` (e.g. `_utils.js`) are never runnable, so use them for s
 
 All settings come from environment variables, validated at startup in `src/config/index.js`. See
 [.env.example](.env.example) for the full list. `FIREBASE_DATABASE_URL` is required; the server refuses to start if
-it's missing or a value is invalid.
+it's missing or a value is invalid. `FIREBASE_SERVICE_ACCOUNT` is optional and enables sending push notifications.

@@ -8,10 +8,33 @@ try {
   if (err.code !== 'ENOENT') throw err;
 }
 
+const isJson = (value) => {
+  try {
+    JSON.parse(value);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(3000),
   FIREBASE_DATABASE_URL: z.url('FIREBASE_DATABASE_URL must be your Firebase Realtime Database URL'),
+  // The service account key file's contents, for sending push notifications through FCM. Optional: without
+  // it, notifications are only logged.
+  FIREBASE_SERVICE_ACCOUNT: z
+    .string()
+    .refine(isJson, 'FIREBASE_SERVICE_ACCOUNT must be the service account key file contents (JSON)')
+    .transform((value) => JSON.parse(value))
+    .pipe(
+      z.looseObject({
+        project_id: z.string().min(1),
+        client_email: z.string().min(1),
+        private_key: z.string().min(1),
+      }),
+    )
+    .optional(),
   SCRIPTS_DIR: z.string().min(1).default('./scripts'),
   SCRIPT_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000), // 5 minutes
   MAX_CONCURRENT_RUNS: z.coerce.number().int().positive().default(5),
@@ -45,6 +68,14 @@ const config = Object.freeze({
   logLevel: env.LOG_LEVEL ?? defaultLogLevel,
   firebase: {
     databaseUrl: env.FIREBASE_DATABASE_URL.replace(/\/+$/, ''), // without trailing slash
+    // null when FIREBASE_SERVICE_ACCOUNT isn't set: push notifications are then logged, not sent.
+    serviceAccount: env.FIREBASE_SERVICE_ACCOUNT
+      ? {
+          projectId: env.FIREBASE_SERVICE_ACCOUNT.project_id,
+          clientEmail: env.FIREBASE_SERVICE_ACCOUNT.client_email,
+          privateKey: env.FIREBASE_SERVICE_ACCOUNT.private_key,
+        }
+      : null,
   },
   scripts: {
     dir: path.resolve(env.SCRIPTS_DIR),

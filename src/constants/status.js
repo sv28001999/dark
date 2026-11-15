@@ -7,7 +7,11 @@ export const RUN_STATUS = Object.freeze({
 });
 
 export const NOTIFICATION_STATUS = Object.freeze({
-  // Sending is not implemented yet: the notification was only written to the server log.
+  // FCM accepted it for at least one target.
+  SENT: 'sent',
+  // FCM rejected it for every target, or there was no target (no registered devices).
+  FAILED: 'failed',
+  // Not sent because FIREBASE_SERVICE_ACCOUNT isn't set: only written to the server log.
   LOGGED: 'logged',
 });
 
