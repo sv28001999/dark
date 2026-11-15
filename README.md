@@ -7,7 +7,7 @@ A layered REST API built with **Node.js and Express 5**, written in plain JavaSc
 - **Runs scripts**: you put Node.js scripts in `scripts/`, and the API runs them in the background and records
   their status and output.
 - **Push notifications**: sends notifications to the mobile app through Firebase Cloud Messaging (FCM), including
-  an alert to every registered device when the odd or even group has 3 or more DOWN outcomes in a row. Needs
+  an alert to every registered device when the odd or even group has 2 or more DOWN outcomes in a row. Needs
   `FIREBASE_SERVICE_ACCOUNT`; without it, notifications are only written to the server log.
 
 > **Storage**: everything is stored in a Firebase Realtime Database, accessed through its public URL (REST API,
@@ -147,9 +147,9 @@ while capturing.
   that outcome. For `UP, DOWN, DOWN, UP, DOWN, DOWN, DOWN` the DOWN count is 3 and the UP count 0.
 - `last20Outcomes`: the latest 20 outcomes of both groups together, oldest first.
 
-**DOWN streak alerts.** Each time the loop saves an outcome, it recounts that group's DOWN streak. When it is 3 or
-more, every registered device gets a push notification, e.g. "Odd: 3 DOWN in a row", and again at 4, 5 and so on,
-until an UP breaks the streak. The data payload is `{ type: "down-streak", group: "odd", count: "3" }`.
+**DOWN streak alerts.** Each time the loop saves an outcome, it recounts that group's DOWN streak. When it is more
+than 1, every registered device gets a push notification, e.g. "Odd: 2 DOWN in a row", and again at 3, 4 and so on,
+until an UP breaks the streak. The data payload is `{ type: "down-streak", group: "odd", count: "2" }`.
 
 ### Push notifications
 

@@ -20,8 +20,8 @@ const LIST_SIZE = 20; // records returned per group by getRecords
 const TICK_MS = 5_000; // how often the capture loop runs
 const OUTCOME_DELAY_SECONDS = 60; // start looking for an event's outcome 1 minute after it ends
 const OUTCOME_GIVE_UP_SECONDS = 15 * 60; // store UNKNOWN if still unresolved 15 minutes after it ends
-// Notify all devices when a group's DOWN streak reaches 3 ("more than 2"), and again on every DOWN after that.
-const DOWN_STREAK_ALERT = 3;
+// Notify all devices when a group's DOWN streak is more than 1 (2+), and again on every DOWN after that.
+const DOWN_STREAK_ALERT = 2;
 
 // Gamma returns some list fields as JSON strings, e.g. outcomes: '["Up", "Down"]'.
 function parseList(value) {
@@ -189,7 +189,7 @@ async function collectOutcomes(now) {
 
 /**
  * For each group that just got an outcome: if its latest outcomes are DOWN at least DOWN_STREAK_ALERT times
- * in a row, sends a push notification to all registered devices ("Odd: 3 DOWN in a row"). Failures are logged,
+ * in a row, sends a push notification to all registered devices ("Odd: 2 DOWN in a row"). Failures are logged,
  * not thrown, so they never stop the capture loop.
  */
 async function alertDownStreaks(groups) {
