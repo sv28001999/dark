@@ -1,20 +1,13 @@
 import { randomUUID } from 'node:crypto';
+import firebase from './firebase.js';
 
-// Records are kept in memory for now, so everything is lost when the server restarts.
-// To store them in a database later, replace the functions below; the services only use these five.
-
-const memory = new Map(); // collection -> Map(id -> record), in creation order
-
-// Drops `undefined` values and makes a copy, so callers never share references with the store.
-const clean = (data) => JSON.parse(JSON.stringify(data));
-
-function records(collection) {
-  if (!memory.has(collection)) memory.set(collection, new Map());
-  return memory.get(collection);
-}
+// Ids start with the creation time in milliseconds, padded so they sort as text in creation order;
+// the random suffix keeps them unique. "Newest first" lists rely on this ordering.
+const newId = () => `${String(Date.now()).padStart(15, '0')}-${randomUUID().slice(0, 8)}`;
 
 /**
- * Storage used by the services:
+ * Generic record storage used by the services, in the Firebase Realtime Database at
+ * <collection>/<id>:
  *   newId(collection)                       → a new unique id, nothing written
  *   create(collection, data, id?)           → the saved record, with its id
  *   update(collection, id, changes)         → merges top-level fields
@@ -22,27 +15,27 @@ function records(collection) {
  *   list(collection, { limit })             → the newest records first
  */
 const database = {
-  newId: () => randomUUID(),
+  newId,
 
-  async create(collection, data, id = randomUUID()) {
-    records(collection).set(id, clean(data));
+  async create(collection, data, id = newId()) {
+    await firebase.put(`${collection}/${id}`, data);
     return { id, ...data };
   },
 
   async update(collection, id, changes) {
-    records(collection).set(id, { ...records(collection).get(id), ...clean(changes) });
+    await firebase.patch(`${collection}/${id}`, changes);
   },
 
   async findById(collection, id) {
-    const record = records(collection).get(id);
-    return record ? { id, ...clean(record) } : null;
+    const record = await firebase.get(`${collection}/${id}`);
+    return record ? { id, ...record } : null;
   },
 
   async list(collection, { limit }) {
-    return [...records(collection)]
-      .slice(-limit)
-      .reverse()
-      .map(([id, record]) => ({ id, ...clean(record) }));
+    const records = await firebase.get(collection, { orderBy: '$key', limitToLast: limit });
+    return Object.entries(records ?? {})
+      .sort(([a], [b]) => (a < b ? 1 : -1))
+      .map(([id, record]) => ({ id, ...record }));
   },
 };
 

@@ -11,6 +11,7 @@ try {
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(3000),
+  FIREBASE_DATABASE_URL: z.url('FIREBASE_DATABASE_URL must be your Firebase Realtime Database URL'),
   SCRIPTS_DIR: z.string().min(1).default('./scripts'),
   SCRIPT_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000), // 5 minutes
   MAX_CONCURRENT_RUNS: z.coerce.number().int().positive().default(5),
@@ -42,6 +43,9 @@ const config = Object.freeze({
   port: env.PORT,
   trustProxy: env.TRUST_PROXY,
   logLevel: env.LOG_LEVEL ?? defaultLogLevel,
+  firebase: {
+    databaseUrl: env.FIREBASE_DATABASE_URL.replace(/\/+$/, ''), // without trailing slash
+  },
   scripts: {
     dir: path.resolve(env.SCRIPTS_DIR),
     timeoutMs: env.SCRIPT_TIMEOUT_MS,

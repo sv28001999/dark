@@ -1,6 +1,7 @@
 import app from './app.js';
 import config from './config/index.js';
 import logger from './config/logger.js';
+import { pruneRecordsOnStartup, stopCapturing } from './services/capture.service.js';
 import { stopAllRuns } from './services/script.service.js';
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
@@ -23,6 +24,9 @@ const server = app.listen(config.port, (err) => {
   logger.info(`Server listening on http://localhost:${config.port} (${config.env})`);
 });
 
+// On every start, keep only the latest 40 capture records in Firebase.
+pruneRecordsOnStartup().catch((err) => logger.error({ err }, 'Could not remove old capture records'));
+
 let shuttingDown = false;
 
 async function shutdown(signal) {
@@ -35,9 +39,9 @@ async function shutdown(signal) {
     process.exit(1);
   }, SHUTDOWN_TIMEOUT_MS).unref();
 
-  // Stop accepting requests and let in-flight ones finish; meanwhile stop running scripts
-  // (they get recorded as cancelled).
-  await Promise.all([new Promise((resolve) => server.close(resolve)), stopAllRuns()]);
+  // Stop accepting requests and let in-flight ones finish; meanwhile stop the capture loop and
+  // running scripts (they get recorded as cancelled).
+  await Promise.all([new Promise((resolve) => server.close(resolve)), stopCapturing(), stopAllRuns()]);
   logger.info('Shutdown complete');
   process.exit(0);
 }

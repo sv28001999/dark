@@ -2,15 +2,15 @@
 
 A layered REST API built with **Node.js and Express 5**, written in plain JavaScript (ES modules).
 
-- **Polymarket capture**: reads the current BTC Up/Down 5-minute event from Polymarket and the outcomes of the
-  previous ones.
+- **Polymarket capture**: continuously records Polymarket's BTC Up/Down 5-minute events and their outcomes
+  (UP/DOWN) in Firebase, split into an odd and an even group, and reports streaks.
 - **Runs scripts**: you put Node.js scripts in `scripts/`, and the API runs them in the background and records
   their status and output.
 - **Notifications**: the notification endpoints validate and record notifications, but **sending is not
   implemented yet**. Notifications are written to the server log.
 
-> **Storage is in memory for now**: runs and notifications are lost when the server restarts. A database will be
-> connected in `src/config/database.js` later.
+> **Storage**: everything is stored in a Firebase Realtime Database, accessed through its public URL (REST API,
+> no credentials). That means the database rules allow anyone with the URL to read and write it.
 
 > **There is no authentication.** Anyone who can reach the server can run your scripts. Keep it on `localhost` or a
 > private network, or put it behind something that restricts access.
@@ -23,7 +23,8 @@ A layered REST API built with **Node.js and Express 5**, written in plain JavaSc
 │   ├── app.js                   # Express app: security, logging, rate limit, routes, 404 + error handler
 │   ├── config/
 │   │   ├── index.js             # Loads + validates environment variables (fails fast on bad config)
-│   │   ├── database.js          # Save/read records (in memory for now)
+│   │   ├── firebase.js          # Firebase Realtime Database REST client (get/put/patch/delete)
+│   │   ├── database.js          # Save/read runs and notifications in Firebase
 │   │   └── logger.js            # pino logger (pretty in dev, JSON in prod)
 │   ├── constants/status.js      # Run, notification and event-outcome statuses
 │   ├── routes/
@@ -37,7 +38,7 @@ A layered REST API built with **Node.js and Express 5**, written in plain JavaSc
 │   ├── validations/             # Zod schemas per endpoint
 │   ├── controllers/             # HTTP layer: validate request, call service, send response
 │   ├── services/                # Business logic (no req/res here)
-│   │   ├── capture.service.js       # BTC Up/Down event time and previous outcomes
+│   │   ├── capture.service.js       # BTC Up/Down capture loop, odd/even records, streaks
 │   │   ├── polymarket.service.js    # Calls to the Polymarket APIs
 │   │   ├── script.service.js        # Starts/cancels script processes, records results
 │   │   └── notification.service.js  # Records notifications (sending not implemented)
@@ -52,7 +53,7 @@ Request
   → app.js        logging, helmet, cors, compression, body parsing, rate limit
   → routes        URL + method → controller
   → controller    validates input (validateRequest + a Zod schema), calls the service, sends the response
-  → service       business rules, saves via config/database.js
+  → service       business rules, saves to Firebase (config/database.js, config/firebase.js)
 Errors thrown anywhere → error handler at the bottom of app.js → consistent JSON error response
 ```
 
@@ -66,7 +67,7 @@ Requirements: Node.js 20.12+.
 
 ```bash
 npm install
-cp .env.example .env    # optional: every setting has a default
+cp .env.example .env    # set FIREBASE_DATABASE_URL; everything else has a default
 npm run dev             # starts with auto-reload on http://localhost:3000
 ```
 
@@ -81,33 +82,59 @@ npm run dev             # starts with auto-reload on http://localhost:3000
 
 ## Endpoints
 
-| Method | Path                                    | Description                                                       |
-| ------ | --------------------------------------- | ----------------------------------------------------------------- |
-| GET    | `/health`                               | Server status                                                     |
-| GET    | `/api/v1/capture/start`                 | startCapturing: current event time + previous 10 outcomes (below) |
-| GET    | `/api/v1/capture/records`               | getRecords (placeholder: returns empty data)                      |
-| POST   | `/api/v1/capture/stop`                  | stopCapturing (placeholder: returns empty data)                   |
-| GET    | `/api/v1/scripts`                       | List runnable scripts                                             |
-| POST   | `/api/v1/scripts/:name/run`             | Start a script in the background → `202` with the run             |
-| GET    | `/api/v1/runs?limit=20`                 | Recent runs, newest first                                         |
-| GET    | `/api/v1/runs/:runId`                   | One run: status, exit code, output, duration                      |
-| POST   | `/api/v1/runs/:runId/cancel`            | Stop a running script                                             |
-| POST   | `/api/v1/notifications`                 | Record a notification (logged, not sent)                          |
-| GET    | `/api/v1/notifications?limit=20`        | Recent notifications, newest first                                |
-| GET    | `/api/v1/notifications/:notificationId` | One notification                                                  |
+| Method | Path                                    | Description                                                   |
+| ------ | --------------------------------------- | ------------------------------------------------------------- |
+| GET    | `/health`                               | Server status                                                 |
+| GET    | `/api/v1/capture/start`                 | startCapturing: store the previous 40 events, start capturing |
+| GET    | `/api/v1/capture/stop`                  | stopCapturing: stop the capture loop                          |
+| GET    | `/api/v1/capture/records`               | getRecords: odd/even records, streak counts, last 20 outcomes |
+| GET    | `/api/v1/capture/cleanup`               | Delete odd/even records except the latest 20 of each          |
+| GET    | `/api/v1/scripts`                       | List runnable scripts                                         |
+| POST   | `/api/v1/scripts/:name/run`             | Start a script in the background → `202` with the run         |
+| GET    | `/api/v1/runs?limit=20`                 | Recent runs, newest first                                     |
+| GET    | `/api/v1/runs/:runId`                   | One run: status, exit code, output, duration                  |
+| POST   | `/api/v1/runs/:runId/cancel`            | Stop a running script                                         |
+| POST   | `/api/v1/notifications`                 | Record a notification (logged, not sent)                      |
+| GET    | `/api/v1/notifications?limit=20`        | Recent notifications, newest first                            |
+| GET    | `/api/v1/notifications/:notificationId` | One notification                                              |
 
-### startCapturing
+### Capture: start, stop, records
 
-`GET /api/v1/capture/start` returns:
+Polymarket runs a `btc-updown-5m-<eventTime>` event every 5 minutes; `eventTime` is its start in Unix seconds, a
+multiple of 300. `currentEventTime` is Polymarket's current time rounded down to that (1794623420 → 1794623400).
 
-- `currentEventTime`: Polymarket's current time rounded down to the start of its 5-minute window
-  (e.g. 1794623420 → 1794623400).
-- `previousResults`: the previous 10 `btc-updown-5m-<time>` events, newest first, each with `outcome` `UP` or
-  `DOWN`.
+Records are stored in Firebase at `btc-updown-5m/odd/<eventTime>` and `btc-updown-5m/even/<eventTime>`:
+`{ eventTime, slug, group, outcome, updatedAt }`. Consecutive events alternate between the groups: an event is
+**even** when `eventTime / 300` is even, **odd** otherwise. `outcome` is `PENDING` until it's collected, then `UP`
+or `DOWN` (`UNKNOWN` if Polymarket still has no result 15 minutes after the event ended).
 
-Polymarket publishes an event's result roughly 80–160 seconds after it ends. Called during that time, the request
-waits until the result is available, so **it can take up to a few minutes**: set your client's timeout to at least
-5 minutes. If a result still isn't available after 4 minutes, that event's outcome is `PENDING`.
+**`GET /api/v1/capture/start`**
+
+1. Stores the previous 40 events with their outcomes (outcomes already in Firebase are kept), and a `PENDING`
+   record for the event in progress.
+2. Removes every older record, so only those 40 (plus the current one) remain.
+3. Starts a loop (every 5 seconds) that runs until stop is called. It creates a `PENDING` record for every new
+   event as it starts, and from 1 minute after each event ends checks Polymarket for its outcome and saves it as
+   soon as it's published (usually 80–160 seconds after the end).
+
+Calling start again restarts the whole process. The loop runs inside the server: after a server restart, call
+start again. On every server start, all records except the latest 40 are removed.
+
+**`GET /api/v1/capture/stop`** stops the loop. Records already stored are kept.
+
+**`GET /api/v1/capture/cleanup`** deletes old records. In each group (odd, even) it keeps the latest 20 records
+that have an outcome (UP/DOWN), plus any newer records still waiting for theirs (the event in progress, or one that
+just ended). It returns how many were removed and kept per group, e.g.
+`{ "removedRecords": { "odd": 7, "even": 0 }, "keptRecords": { "odd": 21, "even": 15 } }`. It can be called
+while capturing.
+
+**`GET /api/v1/capture/records`** returns:
+
+- `currentEventTime`, and `capturing` (whether the loop is running).
+- `oddRecords`, `evenRecords`: the latest 20 records of each group that have an outcome (UP/DOWN), oldest first.
+- `oddDownCount`, `oddUpCount`, `evenDownCount`, `evenUpCount`: how many records in a row each group ends with
+  that outcome. For `UP, DOWN, DOWN, UP, DOWN, DOWN, DOWN` the DOWN count is 3 and the UP count 0.
+- `last20Outcomes`: the latest 20 outcomes of both groups together, oldest first.
 
 ### Run a script
 
@@ -145,4 +172,5 @@ Files starting with `_` (e.g. `_utils.js`) are never runnable, so use them for s
 ## Configuration
 
 All settings come from environment variables, validated at startup in `src/config/index.js`. See
-[.env.example](.env.example) for the full list. The server refuses to start if a value is invalid.
+[.env.example](.env.example) for the full list. `FIREBASE_DATABASE_URL` is required; the server refuses to start if
+it's missing or a value is invalid.
