@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-/** Ids are Firebase push keys. */
+/** Record ids (letters, digits, "-" and "_"). */
 export const recordId = z.string().regex(/^[\w-]{1,128}$/, 'Must be a valid id');
 
 export const listQuery = z.object({

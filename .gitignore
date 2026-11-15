@@ -3,7 +3,3 @@ node_modules/
 coverage/
 *.log
 .DS_Store
-
-# Firebase service account keys — never commit these
-serviceAccountKey.json
-*firebase-adminsdk*.json

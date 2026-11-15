@@ -7,9 +7,16 @@ export const RUN_STATUS = Object.freeze({
 });
 
 export const NOTIFICATION_STATUS = Object.freeze({
-  SENT: 'sent',
-  PARTIAL: 'partial',
-  FAILED: 'failed',
-  // Firebase is disabled: the notification was logged instead of sent.
-  SIMULATED: 'simulated',
+  // Sending is not implemented yet: the notification was only written to the server log.
+  LOGGED: 'logged',
+});
+
+/** Result of a Polymarket Up/Down event. */
+export const EVENT_OUTCOME = Object.freeze({
+  UP: 'UP',
+  DOWN: 'DOWN',
+  // The event has ended but Polymarket hasn't resolved it yet (takes about 1–2 minutes).
+  PENDING: 'PENDING',
+  // The event wasn't found, or it has no clear winner.
+  UNKNOWN: 'UNKNOWN',
 });
