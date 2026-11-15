@@ -85,6 +85,7 @@ npm run dev             # starts with auto-reload on http://localhost:3000
 | Method | Path                                    | Description                                                   |
 | ------ | --------------------------------------- | ------------------------------------------------------------- |
 | GET    | `/health`                               | Server status                                                 |
+| GET    | `/api/v1/capture/status`                | Whether the capture loop is running, and since when           |
 | GET    | `/api/v1/capture/start`                 | startCapturing: store the previous 40 events, start capturing |
 | GET    | `/api/v1/capture/stop`                  | stopCapturing: stop the capture loop                          |
 | GET    | `/api/v1/capture/records`               | getRecords: odd/even records, streak counts, last 20 outcomes |
@@ -121,6 +122,11 @@ Calling start again restarts the whole process. The loop runs inside the server:
 start again. On every server start, all records except the latest 40 are removed.
 
 **`GET /api/v1/capture/stop`** stops the loop. Records already stored are kept.
+
+**`GET /api/v1/capture/status`** returns `{ "capturing": true, "startedAt": "2026-11-15T16:00:02.114Z",
+"latestEventTime": 1794760800 }`: whether the loop is running, when it was started (`null` when stopped), and
+the newest event it has recorded (`null` before the first start). It answers from memory without calling
+Polymarket or Firebase, so it's cheap to poll.
 
 **`GET /api/v1/capture/cleanup`** deletes old records. In each group (odd, even) it keeps the latest 20 records
 that have an outcome (UP/DOWN), plus any newer records still waiting for theirs (the event in progress, or one that

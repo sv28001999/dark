@@ -1,6 +1,10 @@
 import * as captureService from '../services/capture.service.js';
 import { sendSuccess } from '../utils/apiResponse.js';
 
+export function getStatus(_req, res) {
+  sendSuccess(res, { data: captureService.getStatus() });
+}
+
 export async function getRecords(_req, res) {
   const data = await captureService.getRecords();
   sendSuccess(res, { data });

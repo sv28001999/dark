@@ -3,6 +3,7 @@ import * as captureController from '../../controllers/capture.controller.js';
 
 const router = Router();
 
+router.get('/status', captureController.getStatus);
 router.get('/records', captureController.getRecords);
 router.get('/start', captureController.startCapturing);
 router.get('/stop', captureController.stopCapturing);

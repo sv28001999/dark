@@ -128,6 +128,7 @@ const capture = {
   latestEventTime: null, // newest event that has a record
   pending: new Set(), // events whose outcome still has to be collected
   busy: false, // a tick is in progress
+  startedAt: null, // when the running loop was started (ISO string), null when stopped
 };
 let starting = null; // a start in progress, shared by concurrent start calls
 
@@ -198,6 +199,7 @@ async function tick() {
 function stopLoop() {
   if (capture.timer) clearInterval(capture.timer);
   capture.timer = null;
+  capture.startedAt = null;
   capture.pending.clear();
 }
 
@@ -238,6 +240,7 @@ async function start() {
   capture.pending = pending;
   capture.latestEventTime = currentEventTime;
   capture.timer = setInterval(tick, TICK_MS);
+  capture.startedAt = new Date().toISOString();
   logger.info(`Capture: started at event ${currentEventTime} (${groupOf(currentEventTime)} group)`);
 
   return {
@@ -267,6 +270,18 @@ export async function stopCapturing() {
   stopLoop();
   if (wasCapturing) logger.info('Capture: stopped');
   return { capturing: false };
+}
+
+/**
+ * Whether the capture loop is running, since when, and the newest event it has recorded (null before the first
+ * start). Answered from memory, without calling Polymarket or Firebase, so it's cheap to poll.
+ */
+export function getStatus() {
+  return {
+    capturing: isCapturing(),
+    startedAt: capture.startedAt,
+    latestEventTime: capture.latestEventTime,
+  };
 }
 
 /**
