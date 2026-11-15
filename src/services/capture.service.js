@@ -188,33 +188,41 @@ async function collectOutcomes(now) {
 }
 
 /**
- * For each group that just got an outcome: if its latest outcomes are DOWN at least DOWN_STREAK_ALERT times
- * in a row, sends a push notification to all registered devices ("Odd: 2 DOWN in a row"). Failures are logged,
- * not thrown, so they never stop the capture loop.
+ * For each group: counts how many of its latest outcomes are DOWN in a row (D, D, U, D, D, D → 3) and, when that
+ * is at least DOWN_STREAK_ALERT, sends a push notification to all registered devices ("Odd: 3 DOWN in a row"),
+ * unless this same streak was already sent. Returns each group's { count, notification }: notification is the
+ * status of the one sent ("sent", "failed", "logged"), or null when none was. Failures are logged and returned
+ * as `error`, not thrown, so they never stop the capture loop.
  */
 async function alertDownStreaks(groups) {
+  const results = {};
   for (const group of groups) {
+    const result = { count: null, notification: null };
+    results[group] = result;
     try {
       const records = completed(await readGroup(group, { orderBy: '$key', limitToLast: LIST_SIZE + 5 }));
-      const count = streak(records, EVENT_OUTCOME.DOWN);
-      const alert = `${records.at(-1)?.eventTime}:${count}`; // the same streak and length is only sent once
-      if (count < DOWN_STREAK_ALERT || capture.alerted[group] === alert) continue;
+      result.count = streak(records, EVENT_OUTCOME.DOWN);
+      const alert = `${records.at(-1)?.eventTime}:${result.count}`; // the same streak and length is only sent once
+      if (result.count < DOWN_STREAK_ALERT || capture.alerted[group] === alert) continue;
       capture.alerted[group] = alert;
 
       const name = group === 'odd' ? 'Odd' : 'Even';
-      await notificationService.sendToAllDevices(
+      const notification = await notificationService.sendToAllDevices(
         {
-          title: `${name}: ${count} DOWN in a row`,
-          body: `The last ${count} ${group} events ended DOWN.`,
-          data: { type: 'down-streak', group, count: String(count) }, // FCM data values must be strings
+          title: `${name}: ${result.count} DOWN in a row`,
+          body: `The last ${result.count} ${group} events ended DOWN.`,
+          data: { type: 'down-streak', group, count: String(result.count) }, // FCM data values must be strings
         },
         { source: `capture:${group}` },
       );
-      logger.info(`Capture: ${group} DOWN streak ${count}, notified all devices`);
+      result.notification = notification.status;
+      logger.info(`Capture: ${group} DOWN streak ${result.count}, notification ${notification.status}`);
     } catch (err) {
+      result.error = err.message;
       logger.warn({ err }, `Capture: could not send the ${group} DOWN streak notification`);
     }
   }
+  return results;
 }
 
 async function tick() {
@@ -236,6 +244,7 @@ function stopLoop() {
   capture.timer = null;
   capture.startedAt = null;
   capture.pending.clear();
+  capture.alerted = { odd: null, even: null }; // so the next start notifies the current streaks again
 }
 
 async function start() {
@@ -271,7 +280,10 @@ async function start() {
   // 3. Remove everything older than those 40.
   const removedRecords = await pruneRecords(currentEventTime);
 
-  // 4. Keep collecting until stop is called.
+  // 4. Count the DOWN outcomes in a row each group now ends with, and notify all devices of a streak.
+  const downStreaks = await alertDownStreaks(GROUPS);
+
+  // 5. Keep collecting until stop is called.
   capture.pending = pending;
   capture.latestEventTime = currentEventTime;
   capture.timer = setInterval(tick, TICK_MS);
@@ -283,6 +295,7 @@ async function start() {
     capturing: true,
     savedRecords: Object.keys(updates).length,
     removedRecords,
+    downStreaks,
   };
 }
 

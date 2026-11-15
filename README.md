@@ -119,12 +119,19 @@ or `DOWN` (`UNKNOWN` if Polymarket still has no result 15 minutes after the even
 1. Stores the previous 40 events with their outcomes (outcomes already in Firebase are kept), and a `PENDING`
    record for the event in progress.
 2. Removes every older record, so only those 40 (plus the current one) remain.
-3. Starts a loop (every 5 seconds) that runs until stop is called. It creates a `PENDING` record for every new
+3. Counts how many DOWN outcomes in a row each group ends with (odd `D, D, U, U, U, D, D, D` → 3), and sends a
+   DOWN streak alert (below) to all registered devices for each group where that is more than 1.
+4. Starts a loop (every 5 seconds) that runs until stop is called. It creates a `PENDING` record for every new
    event as it starts, and from 1 minute after each event ends checks Polymarket for its outcome and saves it as
    soon as it's published (usually 80–160 seconds after the end).
 
-Calling start again restarts the whole process. The loop runs inside the server: after a server restart, call
-start again. On every server start, all records except the latest 40 are removed.
+It returns `{ currentEventTime, capturing, savedRecords, removedRecords, downStreaks }`, where `downStreaks` is
+e.g. `{ "odd": { "count": 3, "notification": "sent" }, "even": { "count": 0, "notification": null } }`:
+each group's DOWN count, and the status of the notification sent for it (`sent`, `failed`, `logged`), or `null`
+when none was sent.
+
+Calling start again restarts the whole process, including the alerts. The loop runs inside the server: after a
+server restart, call start again. On every server start, all records except the latest 40 are removed.
 
 **`GET /api/v1/capture/stop`** stops the loop. Records already stored are kept.
 
@@ -147,9 +154,9 @@ while capturing.
   that outcome. For `UP, DOWN, DOWN, UP, DOWN, DOWN, DOWN` the DOWN count is 3 and the UP count 0.
 - `last20Outcomes`: the latest 20 outcomes of both groups together, oldest first.
 
-**DOWN streak alerts.** Each time the loop saves an outcome, it recounts that group's DOWN streak. When it is more
-than 1, every registered device gets a push notification, e.g. "Odd: 2 DOWN in a row", and again at 3, 4 and so on,
-until an UP breaks the streak. The data payload is `{ type: "down-streak", group: "odd", count: "2" }`.
+**DOWN streak alerts.** On start, and each time the loop saves an outcome, the group's DOWN streak is counted. When
+it is more than 1, every registered device gets a push notification, e.g. "Odd: 2 DOWN in a row", and again at 3, 4
+and so on, until an UP breaks the streak. The data payload is `{ type: "down-streak", group: "odd", count: "2" }`.
 
 ### Push notifications
 
