@@ -3,3 +3,7 @@ node_modules/
 coverage/
 *.log
 .DS_Store
+
+# Firebase service account key (secret): never commit
+firebase-service-account.json
+*-firebase-adminsdk-*.json
