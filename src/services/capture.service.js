@@ -3,6 +3,7 @@ import logger from '../config/logger.js';
 import { EVENT_OUTCOME } from '../constants/status.js';
 import * as notificationService from './notification.service.js';
 import * as polymarketService from './polymarket.service.js';
+import * as settingsService from './settings.service.js';
 
 // Polymarket's "Bitcoin Up or Down - 5 minute" events start every 5 minutes, on multiples of
 // 300 seconds. Each event's slug is "btc-updown-5m-<start time in Unix seconds>".
@@ -20,8 +21,6 @@ const LIST_SIZE = 20; // records returned per group by getRecords
 const TICK_MS = 5_000; // how often the capture loop runs
 const OUTCOME_DELAY_SECONDS = 60; // start looking for an event's outcome 1 minute after it ends
 const OUTCOME_GIVE_UP_SECONDS = 15 * 60; // store UNKNOWN if still unresolved 15 minutes after it ends
-// Notify all devices when a group's DOWN streak is more than 1 (2+), and again on every DOWN after that.
-const DOWN_STREAK_ALERT = 2;
 
 // Gamma returns some list fields as JSON strings, e.g. outcomes: '["Up", "Down"]'.
 function parseList(value) {
@@ -189,12 +188,18 @@ async function collectOutcomes(now) {
 
 /**
  * For each group: counts how many of its latest outcomes are DOWN in a row (D, D, U, D, D, D → 3) and, when that
- * is at least DOWN_STREAK_ALERT, sends a push notification to all registered devices ("Odd: 3 DOWN in a row"),
- * unless this same streak was already sent. Returns each group's { count, notification }: notification is the
- * status of the one sent ("sent", "failed", "logged"), or null when none was. Failures are logged and returned
- * as `error`, not thrown, so they never stop the capture loop.
+ * is at least the downStreakAlert setting, sends a push notification to all registered devices ("Odd: 3 DOWN in
+ * a row"), and again on every DOWN after that, unless this same streak was already sent. Returns each group's
+ * { count, notification }: notification is the status of the one sent ("sent", "failed", "logged"), or null when
+ * none was. Failures are logged and returned as `error`, not thrown, so they never stop the capture loop.
  */
 async function alertDownStreaks(groups) {
+  // Read on every check, so a changed setting applies to the very next outcome.
+  const { downStreakAlert } = await settingsService.getSettings().catch((err) => {
+    logger.warn({ err }, 'Capture: could not read the settings, using the default DOWN streak alert');
+    return settingsService.DEFAULT_SETTINGS;
+  });
+
   const results = {};
   for (const group of groups) {
     const result = { count: null, notification: null };
@@ -203,7 +208,7 @@ async function alertDownStreaks(groups) {
       const records = completed(await readGroup(group, { orderBy: '$key', limitToLast: LIST_SIZE + 5 }));
       result.count = streak(records, EVENT_OUTCOME.DOWN);
       const alert = `${records.at(-1)?.eventTime}:${result.count}`; // the same streak and length is only sent once
-      if (result.count < DOWN_STREAK_ALERT || capture.alerted[group] === alert) continue;
+      if (result.count < downStreakAlert || capture.alerted[group] === alert) continue;
       capture.alerted[group] = alert;
 
       const name = group === 'odd' ? 'Odd' : 'Even';
