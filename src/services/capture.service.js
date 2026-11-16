@@ -131,7 +131,7 @@ const capture = {
   pending: new Set(), // events whose outcome still has to be collected
   busy: false, // a tick is in progress
   startedAt: null, // when the running loop was started (ISO string), null when stopped
-  alerted: { odd: null, even: null }, // the last DOWN streak notified per group, so it isn't sent twice
+  alerted: { odd: null, even: null }, // the last UP streak notified per group, so it isn't sent twice
 };
 let starting = null; // a start in progress, shared by concurrent start calls
 
@@ -183,20 +183,20 @@ async function collectOutcomes(now) {
     capture.pending.delete(eventTime);
     logger.info(`Capture: event ${eventTime} (${groupOf(eventTime)}) outcome ${outcome}`);
   }
-  await alertDownStreaks(new Set(saved.map(({ eventTime }) => groupOf(eventTime))));
+  await alertUpStreaks(new Set(saved.map(({ eventTime }) => groupOf(eventTime))));
 }
 
 /**
- * For each group: counts how many of its latest outcomes are DOWN in a row (D, D, U, D, D, D → 3) and, when that
- * is at least the downStreakAlert setting, sends a push notification to all registered devices ("Odd: 3 DOWN in
- * a row"), and again on every DOWN after that, unless this same streak was already sent. Returns each group's
+ * For each group: counts how many of its latest outcomes are UP in a row (U, U, D, U, U, U → 3) and, when that
+ * is at least the upStreakAlert setting, sends a push notification to all registered devices ("Odd: 3 UP in
+ * a row"), and again on every UP after that, unless this same streak was already sent. Returns each group's
  * { count, notification }: notification is the status of the one sent ("sent", "failed", "logged"), or null when
  * none was. Failures are logged and returned as `error`, not thrown, so they never stop the capture loop.
  */
-async function alertDownStreaks(groups) {
+async function alertUpStreaks(groups) {
   // Read on every check, so a changed setting applies to the very next outcome.
-  const { downStreakAlert } = await settingsService.getSettings().catch((err) => {
-    logger.warn({ err }, 'Capture: could not read the settings, using the default DOWN streak alert');
+  const { upStreakAlert } = await settingsService.getSettings().catch((err) => {
+    logger.warn({ err }, 'Capture: could not read the settings, using the default UP streak alert');
     return settingsService.DEFAULT_SETTINGS;
   });
 
@@ -206,25 +206,25 @@ async function alertDownStreaks(groups) {
     results[group] = result;
     try {
       const records = completed(await readGroup(group, { orderBy: '$key', limitToLast: LIST_SIZE + 5 }));
-      result.count = streak(records, EVENT_OUTCOME.DOWN);
+      result.count = streak(records, EVENT_OUTCOME.UP);
       const alert = `${records.at(-1)?.eventTime}:${result.count}`; // the same streak and length is only sent once
-      if (result.count < downStreakAlert || capture.alerted[group] === alert) continue;
+      if (result.count < upStreakAlert || capture.alerted[group] === alert) continue;
       capture.alerted[group] = alert;
 
       const name = group === 'odd' ? 'Odd' : 'Even';
       const notification = await notificationService.sendToAllDevices(
         {
-          title: `${name}: ${result.count} DOWN in a row`,
-          body: `The last ${result.count} ${group} events ended DOWN.`,
-          data: { type: 'down-streak', group, count: String(result.count) }, // FCM data values must be strings
+          title: `${name}: ${result.count} UP in a row`,
+          body: `The last ${result.count} ${group} events ended UP.`,
+          data: { type: 'up-streak', group, count: String(result.count) }, // FCM data values must be strings
         },
         { source: `capture:${group}` },
       );
       result.notification = notification.status;
-      logger.info(`Capture: ${group} DOWN streak ${result.count}, notification ${notification.status}`);
+      logger.info(`Capture: ${group} UP streak ${result.count}, notification ${notification.status}`);
     } catch (err) {
       result.error = err.message;
-      logger.warn({ err }, `Capture: could not send the ${group} DOWN streak notification`);
+      logger.warn({ err }, `Capture: could not send the ${group} UP streak notification`);
     }
   }
   return results;
@@ -285,8 +285,8 @@ async function start() {
   // 3. Remove everything older than those 40.
   const removedRecords = await pruneRecords(currentEventTime);
 
-  // 4. Count the DOWN outcomes in a row each group now ends with, and notify all devices of a streak.
-  const downStreaks = await alertDownStreaks(GROUPS);
+  // 4. Count the UP outcomes in a row each group now ends with, and notify all devices of a streak.
+  const upStreaks = await alertUpStreaks(GROUPS);
 
   // 5. Keep collecting until stop is called.
   capture.pending = pending;
@@ -300,7 +300,7 @@ async function start() {
     capturing: true,
     savedRecords: Object.keys(updates).length,
     removedRecords,
-    downStreaks,
+    upStreaks,
   };
 }
 

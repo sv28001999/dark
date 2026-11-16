@@ -7,7 +7,7 @@ A layered REST API built with **Node.js and Express 5**, written in plain JavaSc
 - **Runs scripts**: you put Node.js scripts in `scripts/`, and the API runs them in the background and records
   their status and output.
 - **Push notifications**: sends notifications to the mobile app through Firebase Cloud Messaging (FCM), including
-  an alert to every registered device when the odd or even group has a set number of DOWN outcomes in a row. Needs
+  an alert to every registered device when the odd or even group has a set number of UP outcomes in a row. Needs
   `FIREBASE_SERVICE_ACCOUNT`; without it, notifications are only written to the server log.
 
 > **Storage**: everything is stored in a Firebase Realtime Database, accessed through its public URL (REST API,
@@ -42,12 +42,12 @@ A layered REST API built with **Node.js and Express 5**, written in plain JavaSc
 │   ├── validations/             # Zod schemas per endpoint
 │   ├── controllers/             # HTTP layer: validate request, call service, send response
 │   ├── services/                # Business logic (no req/res here)
-│   │   ├── capture.service.js       # BTC Up/Down capture loop, odd/even records, streaks, DOWN streak alerts
+│   │   ├── capture.service.js       # BTC Up/Down capture loop, odd/even records, streaks, UP streak alerts
 │   │   ├── polymarket.service.js    # Calls to the Polymarket APIs
 │   │   ├── script.service.js        # Starts/cancels script processes, records results
 │   │   ├── notification.service.js  # Sends push notifications through FCM and records them
 │   │   ├── device.service.js        # Push tokens of the devices the mobile app is installed on
-│   │   └── settings.service.js      # Settings stored in Firebase, e.g. the DOWN streak alert
+│   │   └── settings.service.js      # Settings stored in Firebase, e.g. the UP streak alert
 │   └── utils/                   # ApiError, response helper, validateRequest
 └── scripts/                     # Your runnable scripts (example.js included)
 ```
@@ -105,7 +105,7 @@ npm run dev             # starts with auto-reload on http://localhost:3000
 | GET    | `/api/v1/notifications?limit=20`        | Recent notifications, newest first                            |
 | GET    | `/api/v1/notifications/:notificationId` | One notification                                              |
 | POST   | `/api/v1/devices`                       | Register a device's push token (called by the mobile app)     |
-| GET    | `/api/v1/settings`                      | Settings, e.g. `downStreakAlert`                              |
+| GET    | `/api/v1/settings`                      | Settings, e.g. `upStreakAlert`                                |
 | PATCH  | `/api/v1/settings`                      | Change settings                                               |
 
 ### Capture: start, stop, records
@@ -123,15 +123,15 @@ or `DOWN` (`UNKNOWN` if Polymarket still has no result 15 minutes after the even
 1. Stores the previous 40 events with their outcomes (outcomes already in Firebase are kept), and a `PENDING`
    record for the event in progress.
 2. Removes every older record, so only those 40 (plus the current one) remain.
-3. Counts how many DOWN outcomes in a row each group ends with (odd `D, D, U, U, U, D, D, D` → 3), and sends a
-   DOWN streak alert (below) to all registered devices for each group where that reaches `downStreakAlert`.
+3. Counts how many UP outcomes in a row each group ends with (odd `U, U, D, D, D, U, U, U` → 3), and sends an
+   UP streak alert (below) to all registered devices for each group where that reaches `upStreakAlert`.
 4. Starts a loop (every 5 seconds) that runs until stop is called. It creates a `PENDING` record for every new
    event as it starts, and from 1 minute after each event ends checks Polymarket for its outcome and saves it as
    soon as it's published (usually 80–160 seconds after the end).
 
-It returns `{ currentEventTime, capturing, savedRecords, removedRecords, downStreaks }`, where `downStreaks` is
+It returns `{ currentEventTime, capturing, savedRecords, removedRecords, upStreaks }`, where `upStreaks` is
 e.g. `{ "odd": { "count": 3, "notification": "sent" }, "even": { "count": 0, "notification": null } }`:
-each group's DOWN count, and the status of the notification sent for it (`sent`, `failed`, `logged`), or `null`
+each group's UP count, and the status of the notification sent for it (`sent`, `failed`, `logged`), or `null`
 when none was sent.
 
 Calling start again restarts the whole process, including the alerts. The loop runs inside the server: after a
@@ -158,18 +158,18 @@ while capturing.
   that outcome. For `UP, DOWN, DOWN, UP, DOWN, DOWN, DOWN` the DOWN count is 3 and the UP count 0.
 - `last20Outcomes`: the latest 20 outcomes of both groups together, oldest first.
 
-**DOWN streak alerts.** On start, and each time the loop saves an outcome, the group's DOWN streak is counted. When
-it reaches the `downStreakAlert` setting (default 2), every registered device gets a push notification, e.g.
-"Odd: 2 DOWN in a row", and again on every DOWN after that, until an UP breaks the streak. The data payload is
-`{ type: "down-streak", group: "odd", count: "2" }`.
+**UP streak alerts.** On start, and each time the loop saves an outcome, the group's UP streak is counted. When
+it reaches the `upStreakAlert` setting (default 2), every registered device gets a push notification, e.g.
+"Odd: 2 UP in a row", and again on every UP after that, until a DOWN breaks the streak. The data payload is
+`{ type: "up-streak", group: "odd", count: "2" }`.
 
 ### Settings
 
 Stored in Firebase at `settings`. **`GET /api/v1/settings`** returns them, with defaults for any not saved yet:
-`{ "downStreakAlert": 2 }`. **`PATCH /api/v1/settings`** with e.g. `{ "downStreakAlert": 3 }` saves the given
-settings and returns all of them.
+`{ "upStreakAlert": 2 }`. **`PATCH /api/v1/settings`** with e.g. `{ "upStreakAlert": 3 }` saves the given
+settings and returns all of them. Settings that no longer exist (such as the old `downStreakAlert`) are ignored.
 
-- `downStreakAlert` (1–20, default 2): how many DOWN outcomes in a row trigger a DOWN streak alert. It is read on
+- `upStreakAlert` (1–20, default 2): how many UP outcomes in a row trigger an UP streak alert. It is read on
   every check, so a change applies from the next outcome.
 
 ### Push notifications
