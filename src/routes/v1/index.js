@@ -5,6 +5,7 @@ import notificationRoutes from './notification.routes.js';
 import runRoutes from './run.routes.js';
 import scriptRoutes from './script.routes.js';
 import settingsRoutes from './settings.routes.js';
+import tradingRoutes from './trading.routes.js';
 
 const router = Router();
 
@@ -14,5 +15,6 @@ router.use('/notifications', notificationRoutes);
 router.use('/devices', deviceRoutes);
 router.use('/capture', captureRoutes);
 router.use('/settings', settingsRoutes);
+router.use('/trading', tradingRoutes);
 
 export default router;

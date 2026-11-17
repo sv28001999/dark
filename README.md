@@ -6,6 +6,8 @@ A layered REST API built with **Node.js and Express 5**, written in plain JavaSc
   (UP/DOWN) in Firebase, split into an odd and an even group, and reports streaks.
 - **Runs scripts**: you put Node.js scripts in `scripts/`, and the API runs them in the background and records
   their status and output.
+- **Trading (simulated)**: buys the DOWN side of odd or even events following a step ladder (bigger after a loss,
+  back to $1 after a win). For now nothing is sent to Polymarket: each buy is saved as a trade in Firebase.
 - **Push notifications**: sends notifications to the mobile app through Firebase Cloud Messaging (FCM), including
   an alert to every registered device when the odd or even group has a set number of UP outcomes in a row. Needs
   `FIREBASE_SERVICE_ACCOUNT`; without it, notifications are only written to the server log.
@@ -38,11 +40,14 @@ A layered REST API built with **Node.js and Express 5**, written in plain JavaSc
 │   │       ├── run.routes.js
 │   │       ├── notification.routes.js
 │   │       ├── device.routes.js
-│   │       └── settings.routes.js
+│   │       ├── settings.routes.js
+│   │       └── trading.routes.js
 │   ├── validations/             # Zod schemas per endpoint
 │   ├── controllers/             # HTTP layer: validate request, call service, send response
 │   ├── services/                # Business logic (no req/res here)
 │   │   ├── capture.service.js       # BTC Up/Down capture loop, odd/even records, streaks, UP streak alerts
+│   │   ├── btcEvent.service.js      # BTC Up/Down 5m events: timing, odd/even, outcomes, DOWN price
+│   │   ├── trading.service.js       # Simulated trading loop: odd/even, step ladder, trades
 │   │   ├── polymarket.service.js    # Calls to the Polymarket APIs
 │   │   ├── script.service.js        # Starts/cancels script processes, records results
 │   │   ├── notification.service.js  # Sends push notifications through FCM and records them
@@ -107,6 +112,12 @@ npm run dev             # starts with auto-reload on http://localhost:3000
 | POST   | `/api/v1/devices`                       | Register a device's push token (called by the mobile app)     |
 | GET    | `/api/v1/settings`                      | Settings, e.g. `upStreakAlert`                                |
 | PATCH  | `/api/v1/settings`                      | Change settings                                               |
+| POST   | `/api/v1/trading/odd/start`             | Start trading odd events (simulated)                          |
+| POST   | `/api/v1/trading/even/start`            | Start trading even events (simulated)                         |
+| POST   | `/api/v1/trading/odd/stop`              | Stop trading odd events                                       |
+| POST   | `/api/v1/trading/even/stop`             | Stop trading even events                                      |
+| POST   | `/api/v1/trading/stop`                  | Stop all trading                                              |
+| GET    | `/api/v1/trading/status`                | Each group's trading state, and the step ladder               |
 
 ### Capture: start, stop, records
 
@@ -171,6 +182,54 @@ settings and returns all of them. Settings that no longer exist (such as the old
 
 - `upStreakAlert` (1–20, default 2): how many UP outcomes in a row trigger an UP streak alert. It is read on
   every check, so a change applies from the next outcome.
+
+### Trading (simulated)
+
+**Nothing is sent to Polymarket yet.** Each buy is saved as a trade in Firebase at `trades/<id>`:
+`{ group, eventTime, slug, side: "DOWN", orderType, amount, price, quantity, step, epoch, placedAt, status,
+outcome, resolvedAt, simulated: true }`. `epoch` is when it was placed (Unix seconds). `price` is the limit price,
+or for a market order the DOWN side's price on Polymarket at that moment (`null` if unavailable). `quantity` is set
+for limit orders only. `status` is `open`, then `won` (the event ended DOWN), `lost` (UP) or `unknown`, or
+`cancelled` (trading stopped before its event started: nothing bought, with `cancelledAt` and `cancelReason`).
+
+Odd and even are traded separately, each on its own events. **`POST /api/v1/trading/odd/start`** (or `even`)
+skips the event in progress, picks the group's next event and places the first order right away. Then:
+
+1. The order buys the DOWN side of its event, ahead of the event's start, with the current step's order (table
+   below).
+2. 2 minutes after the event ends, its outcome is checked (again every 5 seconds until Polymarket has it).
+3. DOWN: the trade won, the next trade is step 1. UP: it lost, the next trade is the next step. No outcome 15
+   minutes after the end: `unknown`, the same step again.
+4. As soon as the outcome is known, the next order is placed, on the group's first event that hasn't started yet.
+
+| Step | Order                                                                 |
+| ---- | --------------------------------------------------------------------- |
+| 1    | $1 market                                                             |
+| 2    | $1.50 market                                                          |
+| 3    | $2.94 limit: 6 shares at $0.49                                        |
+| 4–10 | limit at $0.49: 12, 24, 48, 96, 192, 384, 768 shares ($6, $12 … $384) |
+
+Losing step 10 stops trading for the group. Starting again begins at step 1. Starting a group that is already
+trading returns `409`. An order is placed at most 1 minute after its event starts; if the server was busy or asleep
+past that, the event is skipped.
+
+**Failures are retried.** Every Polymarket request is retried up to 5 times (waiting 1, 2, 3 and 4 seconds) when it
+fails in a way that may pass: network error, timeout, HTTP 5xx or 429. A buy is retried up to 5 times too; if all
+fail, that event is skipped, the next event is bought at the same step, and the error is shown in the app
+(`lastError`) until the next successful buy.
+
+**`POST /api/v1/trading/{odd|even}/stop`** stops a group and **`POST /api/v1/trading/stop`** stops both: no new
+orders. An open order whose event hasn't started is cancelled; one whose event is under way stays open until its
+outcome is recorded. An order that was being placed at the moment of the stop is cancelled too.
+**`GET /api/v1/trading/status`** returns each group's state and the step table.
+
+Each group's state is kept in Firebase at `trading/{odd|even}` for the mobile app: `{ active, current, ifLost,
+nextEventTime, openTrade, lastResult, lastError, startedAt, stoppedAt, stoppedReason }`, where `current` is the open
+or next trade's step and order, and `ifLost` the step after a loss (both `null` when stopped).
+
+Like capture, trading runs inside the server and stops when it restarts: on startup, groups still shown as trading
+are marked stopped ("Server restarted"), and their open orders are handled like a stop. **`npm run dev` restarts the
+server whenever a source file is saved**, so use `npm start` while trading.
 
 ### Push notifications
 

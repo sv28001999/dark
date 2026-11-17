@@ -1,17 +1,19 @@
 import firebase from '../config/firebase.js';
 import logger from '../config/logger.js';
 import { EVENT_OUTCOME } from '../constants/status.js';
+import {
+  getOutcomes,
+  groupOf,
+  isFinal,
+  SLUG_PREFIX,
+  WINDOW_SECONDS,
+  windowStart,
+} from './btcEvent.service.js';
 import * as notificationService from './notification.service.js';
 import * as polymarketService from './polymarket.service.js';
 import * as settingsService from './settings.service.js';
 
-// Polymarket's "Bitcoin Up or Down - 5 minute" events start every 5 minutes, on multiples of
-// 300 seconds. Each event's slug is "btc-updown-5m-<start time in Unix seconds>".
-const WINDOW_SECONDS = 5 * 60;
-const SLUG_PREFIX = 'btc-updown-5m-';
-
-// Firebase layout: btc-updown-5m/{odd|even}/<eventTime> = record. Consecutive events alternate between
-// the groups: an event is "even" when its number in the 5-minute sequence (eventTime / 300) is even.
+// Firebase layout: btc-updown-5m/{odd|even}/<eventTime> = record (see groupOf for odd/even).
 const ROOT = 'btc-updown-5m';
 const GROUPS = ['odd', 'even'];
 
@@ -22,45 +24,6 @@ const TICK_MS = 5_000; // how often the capture loop runs
 const OUTCOME_DELAY_SECONDS = 60; // start looking for an event's outcome 1 minute after it ends
 const OUTCOME_GIVE_UP_SECONDS = 15 * 60; // store UNKNOWN if still unresolved 15 minutes after it ends
 
-// Gamma returns some list fields as JSON strings, e.g. outcomes: '["Up", "Down"]'.
-function parseList(value) {
-  if (Array.isArray(value)) return value;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return [];
-  }
-}
-
-/**
- * UP or DOWN once the market is resolved (the winning outcome's price becomes 1, the loser's 0),
- * PENDING while it is still waiting to be resolved, UNKNOWN if the event is missing or unclear.
- */
-function outcomeOf(event) {
-  const market = event?.markets?.[0];
-  if (!market) return EVENT_OUTCOME.UNKNOWN;
-  if (!market.closed) return EVENT_OUTCOME.PENDING;
-
-  const outcomes = parseList(market.outcomes); // ["Up", "Down"]
-  const prices = parseList(market.outcomePrices).map(Number); // [1, 0] = Up won, [0, 1] = Down won
-  const winner = String(outcomes[prices.indexOf(1)] ?? '').toUpperCase();
-
-  return winner === EVENT_OUTCOME.UP || winner === EVENT_OUTCOME.DOWN ? winner : EVENT_OUTCOME.UNKNOWN;
-}
-
-/** Looks up the outcome of each event on Polymarket, in one request. */
-async function getOutcomes(eventTimes) {
-  const events = await polymarketService.getEventsBySlugs(eventTimes.map((time) => SLUG_PREFIX + time));
-  const eventsBySlug = new Map(events.map((event) => [event.slug, event]));
-  return eventTimes.map((eventTime) => ({
-    eventTime,
-    outcome: outcomeOf(eventsBySlug.get(SLUG_PREFIX + eventTime)),
-  }));
-}
-
-const isFinal = (outcome) => outcome === EVENT_OUTCOME.UP || outcome === EVENT_OUTCOME.DOWN;
-const windowStart = (time) => Math.floor(time / WINDOW_SECONDS) * WINDOW_SECONDS;
-const groupOf = (eventTime) => ((eventTime / WINDOW_SECONDS) % 2 === 0 ? 'even' : 'odd');
 const recordPath = (eventTime) => `${groupOf(eventTime)}/${eventTime}`; // relative to ROOT
 
 function newRecord(eventTime, outcome) {

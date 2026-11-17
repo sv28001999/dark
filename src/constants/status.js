@@ -15,6 +15,20 @@ export const NOTIFICATION_STATUS = Object.freeze({
   LOGGED: 'logged',
 });
 
+/** A (simulated) trade on an event's DOWN side. */
+export const TRADE_STATUS = Object.freeze({
+  OPEN: 'open', // placed, waiting for the event's outcome
+  WON: 'won', // the event ended DOWN
+  LOST: 'lost', // the event ended UP
+  UNKNOWN: 'unknown', // no clear outcome 15 minutes after the event ended
+  CANCELLED: 'cancelled', // trading stopped before its event started: nothing bought
+});
+
+export const ORDER_TYPE = Object.freeze({
+  MARKET: 'MARKET',
+  LIMIT: 'LIMIT',
+});
+
 /** Result of a Polymarket Up/Down event. */
 export const EVENT_OUTCOME = Object.freeze({
   UP: 'UP',

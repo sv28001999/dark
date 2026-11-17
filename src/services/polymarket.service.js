@@ -1,21 +1,45 @@
 import config from '../config/index.js';
 import ApiError from '../utils/ApiError.js';
+import retry from '../utils/retry.js';
 
 const REQUEST_TIMEOUT_MS = 10_000;
+const ATTEMPTS = 5; // a failed request is retried up to 4 more times
 
-/** GETs a Polymarket URL and returns the response body as text. Throws a 502 if it fails. */
-async function get(url) {
+/** A 502 ApiError; `retryable` when trying again may help (network error, timeout, overload, rate limit). */
+function polymarketError(message, retryable) {
+  const error = new ApiError(502, message);
+  error.retryable = retryable;
+  return error;
+}
+
+/** One GET of a Polymarket URL, returning the response body as text. */
+async function getOnce(url) {
   let response;
   try {
     response = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
   } catch (err) {
-    throw new ApiError(502, `Could not reach Polymarket (${url}): ${err.message}`);
+    throw polymarketError(`Could not reach Polymarket (${url}): ${err.message}`, true);
   }
 
   if (!response.ok) {
-    throw new ApiError(502, `Polymarket returned HTTP ${response.status} for ${url}`);
+    await response.text().catch(() => {}); // read the body anyway, so the connection is released
+    const retryable = response.status >= 500 || response.status === 429;
+    throw polymarketError(`Polymarket returned HTTP ${response.status} for ${url}`, retryable);
   }
-  return response.text();
+  try {
+    return await response.text();
+  } catch (err) {
+    throw polymarketError(`Polymarket's response was cut off (${url}): ${err.message}`, true);
+  }
+}
+
+/** GETs a Polymarket URL and returns the body as text, retrying failures that may pass. Throws a 502 if it fails. */
+function get(url) {
+  return retry(() => getOnce(url), {
+    attempts: ATTEMPTS,
+    label: `Polymarket ${new URL(url).pathname}`,
+    shouldRetry: (err) => err.retryable,
+  });
 }
 
 async function getJson(url) {
