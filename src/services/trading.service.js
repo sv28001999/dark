@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks';
 import config from '../config/index.js';
 import database from '../config/database.js';
 import firebase from '../config/firebase.js';
@@ -19,9 +20,16 @@ import * as polymarketTrading from './polymarketTrading.service.js';
 
 // Odd and even are traded separately, each on its own events (see groupOf). Every trade buys the DOWN side of
 // an event, following STEPS: after a win (the event ended DOWN) the next trade is step 1, after a loss (UP) the
-// next step. Each trade's outcome is checked 2 minutes after its event ends, and the order for the next trade is
-// placed right then, on the group's first event that hasn't started yet. On start, the first order is placed
-// right away the same way (the event in progress is skipped).
+// next step. Each trade's outcome is checked 1 minute after its event ends, and the order for the next trade is
+// placed right then, on the group's first event that hasn't started yet.
+//
+// On start, the starting step comes from the group's latest results, as if it had been trading all along: after
+// U, U, U (and a D before them) it starts at step 4. The event in progress is skipped, and the first order is
+// placed as soon as that step is known.
+//
+// Trading survives a server restart: each group's state (step, open trade, next event) and the pending work
+// (trades waiting for their result, winnings to redeem) are kept in Firebase, and the server continues from there
+// when it starts, by the group's own trades (resumeOnStartup).
 //
 // TRADING_MODE "simulated" (default): each buy is only saved as a trade in Firebase.
 // TRADING_MODE "live": real orders on Polymarket with real money (polymarketTrading.service.js). A trade's
@@ -32,13 +40,16 @@ const GROUPS = ['odd', 'even'];
 const SIDE = EVENT_OUTCOME.DOWN;
 const TRADES = 'trades'; // database collection: trades/<id>
 const STATE = 'trading'; // Firebase: trading/{odd|even} = each group's state, shown live in the mobile app
+const QUEUE = 'tradingQueue'; // Firebase: { unresolved, redeem }: pending work, kept for after a restart
 
 const TICK_MS = 5_000; // how often the trading loop runs
-const RESULT_DELAY_SECONDS = 2 * 60; // check a trade's outcome 2 minutes after its event ends
+const RESULT_DELAY_SECONDS = 60; // check a trade's outcome 1 minute after its event ends
 const GIVE_UP_SECONDS = 15 * 60; // still no outcome 15 minutes after the end: UNKNOWN, the step is kept
 const LATE_LIMIT_SECONDS = 60; // buy into an event at most 1 minute after it started; later, take the next one
 const BUY_ATTEMPTS = 5; // a failed buy is retried up to 4 more times, then that event is skipped
 const REDEEM_ATTEMPTS = 5; // redeeming winnings is tried 1, 2, 4 and 8 minutes after a failure, then left to you
+const START_LOOKBACK = 12; // the group's latest results looked at to choose the starting step
+const PAUSE_WAIT_MS = 8_000; // on shutdown, how long to let a tick in progress finish
 
 /** The order for each step, all on the DOWN side. Losing the last step stops trading for the group. */
 export const STEPS = Object.freeze([
@@ -48,26 +59,28 @@ export const STEPS = Object.freeze([
   { amount: 6, orderType: ORDER_TYPE.LIMIT, price: 0.49, quantity: 12 },
   { amount: 12, orderType: ORDER_TYPE.LIMIT, price: 0.49, quantity: 24 },
   { amount: 24, orderType: ORDER_TYPE.LIMIT, price: 0.49, quantity: 48 },
-  { amount: 48, orderType: ORDER_TYPE.LIMIT, price: 0.49, quantity: 96 },
-  { amount: 96, orderType: ORDER_TYPE.LIMIT, price: 0.49, quantity: 192 },
-  { amount: 192, orderType: ORDER_TYPE.LIMIT, price: 0.49, quantity: 384 },
-  { amount: 384, orderType: ORDER_TYPE.LIMIT, price: 0.49, quantity: 768 },
+  { amount: 48, orderType: ORDER_TYPE.LIMIT, price: 0.5, quantity: 96 },
+  { amount: 96, orderType: ORDER_TYPE.LIMIT, price: 0.5, quantity: 192 },
+  { amount: 192, orderType: ORDER_TYPE.LIMIT, price: 0.5, quantity: 384 },
+  { amount: 384, orderType: ORDER_TYPE.LIMIT, price: 0.5, quantity: 768 },
 ]);
 
 const newGroupState = () => ({
   active: false,
-  step: 1, // step of the open trade, or of the next one
+  step: null, // step of the open trade, or of the next one; null until the starting step is chosen
   nextEventTime: null, // event the next trade is for (null while a trade is open, or when stopped)
-  openTrade: null, // { id, eventTime, step, ...order, epoch, orderId? }: placed, waiting for its outcome
+  openTrade: null, // { id, eventTime, step, ...order, epoch, orderId?, conditionId? }: waiting for its outcome
+  placingTradeId: null, // live: the trade whose order is being sent right now
   lastResult: null, // { eventTime, step, outcome, result }
   lastError: null, // { at, message }: e.g. a buy that failed every attempt; cleared by the next successful buy
+  startedFrom: null, // { step, upStreak }: how the starting step was chosen
+  resumedAt: null, // when trading continued after a server restart
   startedAt: null,
   stoppedAt: null,
   stoppedReason: null,
   run: 0, // which start this state belongs to: a buy started before a stop or restart must not count
 });
 
-// The loop runs in this process only: after a server restart, call start again.
 const trading = {
   timer: null,
   busy: false, // a tick is in progress
@@ -93,21 +106,25 @@ function nextEventFor(group, now) {
 
 const stepOrder = (step) => (STEPS[step - 1] ? { step, ...STEPS[step - 1] } : null);
 
-/** What the mobile app shows for a group. */
+/** A group's state: what the mobile app shows, and what trading continues from after a restart. */
 function publicState(group) {
   const state = trading.groups[group];
   return {
     group,
     mode: config.trading.mode,
     active: state.active,
+    step: state.step,
     // While trading: the open trade's order, or the next one's, and the order after a loss (null after the last
-    // step). Null when stopped.
-    current: state.active ? stepOrder(state.step) : null,
-    ifLost: state.active ? stepOrder(state.step + 1) : null,
+    // step). Null when stopped, or while the starting step is being chosen.
+    current: state.active && state.step ? stepOrder(state.step) : null,
+    ifLost: state.active && state.step ? stepOrder(state.step + 1) : null,
     nextEventTime: state.nextEventTime,
     openTrade: state.openTrade,
+    placingTradeId: state.placingTradeId,
     lastResult: state.lastResult,
     lastError: state.lastError,
+    startedFrom: state.startedFrom,
+    resumedAt: state.resumedAt,
     startedAt: state.startedAt,
     stoppedAt: state.stoppedAt,
     stoppedReason: state.stoppedReason,
@@ -116,6 +133,13 @@ function publicState(group) {
 }
 
 const saveState = (group) => firebase.put(`${STATE}/${group}`, publicState(group));
+
+/** Saves the pending work (trades waiting for their result, winnings to redeem), for after a restart. */
+const saveQueue = () =>
+  firebase.put(QUEUE, {
+    unresolved: Object.fromEntries(trading.unresolved),
+    redeem: Object.fromEntries(trading.toRedeem),
+  });
 
 function stopGroup(group, reason) {
   const state = trading.groups[group];
@@ -150,6 +174,7 @@ async function cancelTrade(trade, reason) {
     }
   }
   trading.unresolved.delete(trade.id);
+  await saveQueue();
   await updateTrade(trade.id, {
     status: TRADE_STATUS.CANCELLED,
     cancelledAt: new Date().toISOString(),
@@ -161,10 +186,34 @@ async function cancelTrade(trade, reason) {
 // ── Trading loop ───────────────────────────────────────────────────────────────────────────────
 
 /**
+ * The starting step for a group: one more than the number of UP results its latest events ended with, as if it
+ * had been trading all along (U, U, U after a D → step 4), up to the last step. Events without a clear result are
+ * skipped. Resolves to null while one of those events is still waiting for its result.
+ */
+async function chooseStartStep(group, now) {
+  let newest = windowStart(now) - WINDOW_SECONDS; // the event that ended last
+  if (groupOf(newest) !== group) newest -= WINDOW_SECONDS;
+  const eventTimes = Array.from({ length: START_LOOKBACK }, (_, i) => newest - i * 2 * WINDOW_SECONDS);
+  const results = await getOutcomes(eventTimes);
+
+  const stillComing = ({ eventTime, outcome }) =>
+    outcome === EVENT_OUTCOME.PENDING && now < eventTime + WINDOW_SECONDS + GIVE_UP_SECONDS;
+  if (results.some(stillComing)) return null;
+
+  let upStreak = 0;
+  for (const { outcome } of results) {
+    if (outcome === EVENT_OUTCOME.DOWN) break;
+    if (outcome === EVENT_OUTCOME.UP) upStreak += 1;
+  }
+  return { upStreak, step: Math.min(upStreak + 1, STEPS.length) };
+}
+
+/**
  * Places one order on an event's DOWN side and saves it as a trade. Simulated: only saved. Live: the trade is saved
- * first (status "placing"), so an order can never exist without a record, then the order is sent. A rejected order
- * is marked "failed" and throws, so it can be retried; one that may have been placed is marked "unconfirmed" and
- * throws UnconfirmedOrderError, which must not be retried.
+ * first (status "placing", and noted in the group's state), so an order can never exist without a record and a
+ * restart during the send is noticed. Then the order is sent. A rejected order is marked "failed" and throws, so it
+ * can be retried; one that may have been placed is marked "unconfirmed" and throws UnconfirmedOrderError, which
+ * must not be retried.
  */
 async function buy(group, eventTime, step, order, now) {
   const record = {
@@ -188,11 +237,15 @@ async function buy(group, eventTime, step, order, now) {
     return database.create(TRADES, { ...record, price, status: TRADE_STATUS.OPEN });
   }
 
+  const state = trading.groups[group];
   const trade = await database.create(TRADES, {
     ...record,
     price: order.price ?? null,
     status: TRADE_STATUS.PLACING,
   });
+  state.placingTradeId = trade.id;
+  await saveState(group);
+
   let placed;
   try {
     placed = await polymarketTrading.placeOrder(eventTime, order);
@@ -202,46 +255,61 @@ async function buy(group, eventTime, step, order, now) {
       status: unconfirmed ? TRADE_STATUS.UNCONFIRMED : TRADE_STATUS.FAILED,
       error: err.message,
     }).catch((updateErr) => logger.error({ err: updateErr }, `Trading: could not record the failed order`));
+    state.placingTradeId = null;
     throw err;
   }
   await updateTrade(trade.id, { ...placed, status: TRADE_STATUS.OPEN });
+  state.placingTradeId = null; // the caller saves the state, with this trade as the open one
   return { ...trade, ...placed, status: TRADE_STATUS.OPEN };
 }
 
 /** Makes a placed trade the group's open trade, and checks its outcome when its event is over. */
-function trackTrade(group, trade, step, order) {
+async function trackTrade(group, trade, step, order) {
   const state = trading.groups[group];
+  const { id, eventTime, orderId, conditionId } = trade;
   state.openTrade = {
-    id: trade.id,
-    eventTime: trade.eventTime,
+    id,
+    eventTime,
     step,
     orderType: order.orderType,
     amount: order.amount,
     price: trade.price ?? null,
     ...(order.quantity && { quantity: order.quantity }),
     epoch: trade.epoch,
-    ...(trade.orderId && { orderId: trade.orderId }),
+    ...(orderId && { orderId }),
+    ...(conditionId && { conditionId }),
   };
-  const { id, eventTime, orderId, conditionId } = trade;
   trading.unresolved.set(id, { id, group, eventTime, orderId, conditionId });
+  await saveQueue();
 }
 
 /**
- * Buys the DOWN side of the group's next event, as soon as that event has been chosen (on start, and right after
- * the previous trade's outcome). A failed buy is retried up to BUY_ATTEMPTS times; if every attempt fails, that
- * event is skipped and the group's next event is bought instead, at the same step. Live, an order that may or may
- * not have been placed is never retried: trading stops for the group, to be checked on polymarket.com.
+ * Buys the DOWN side of the group's next event, as soon as that event has been chosen (on start, once the starting
+ * step is known, and right after the previous trade's outcome). A failed buy is retried up to BUY_ATTEMPTS times;
+ * if every attempt fails, that event is skipped and the group's next event is bought instead, at the same step.
+ * Live, an order that may or may not have been placed is never retried: trading stops for the group, to be checked
+ * on polymarket.com.
  */
 async function placeNextOrder(group, now) {
   const state = trading.groups[group];
   if (!state.active || state.openTrade || state.nextEventTime === null) return;
 
   if (now > state.nextEventTime + LATE_LIMIT_SECONDS) {
-    // e.g. the server was busy or asleep: don't buy into an event that's well under way
+    // e.g. the server was busy, asleep or restarting: don't buy into an event that's well under way
     logger.warn(`Trading: missed the ${group} event ${state.nextEventTime}, taking the next one`);
     state.nextEventTime = nextEventFor(group, now);
     await saveState(group);
     return;
+  }
+
+  if (state.step === null) {
+    const { run } = state;
+    const start = await chooseStartStep(group, now);
+    if (!start || !state.active || state.run !== run) return; // waiting for the latest result, or stopped
+    state.step = start.step;
+    state.startedFrom = start;
+    await saveState(group);
+    logger.info(`Trading: ${group} starts at step ${start.step} (last ${start.upStreak} result(s) UP)`);
   }
 
   const eventTime = state.nextEventTime;
@@ -283,17 +351,15 @@ async function placeNextOrder(group, now) {
   if (!stillWanted()) {
     // Stopped while the order was being placed: cancel it. Live, shares it already bought are kept and tracked.
     const cancelled = await cancelTrade(trade, 'Stopped while the order was being placed');
-    if (!cancelled) {
-      trackTrade(group, trade, step, order);
-      await saveState(group);
-    }
+    if (!cancelled) await trackTrade(group, trade, step, order);
+    await saveState(group);
     logger.info(
       `Trading: ${group} stopped during a buy on ${eventTime}, ${cancelled ? 'cancelled' : 'kept'} it`,
     );
     return;
   }
 
-  trackTrade(group, trade, step, order);
+  await trackTrade(group, trade, step, order);
   state.nextEventTime = null;
   state.lastError = null;
   await saveState(group);
@@ -328,6 +394,8 @@ async function resolveTrade({ id, group, eventTime, orderId, conditionId }, now)
   else if (finalOutcome === EVENT_OUTCOME.UNKNOWN) result = TRADE_STATUS.UNKNOWN;
   else if (finalOutcome === SIDE) result = TRADE_STATUS.WON;
 
+  // The record, then the pending work, then the group: if the server stops in between, this runs again after the
+  // restart and the steps still move only once.
   await updateTrade(id, {
     status: result,
     outcome: finalOutcome,
@@ -338,10 +406,11 @@ async function resolveTrade({ id, group, eventTime, orderId, conditionId }, now)
   if (LIVE && result === TRADE_STATUS.WON) {
     trading.toRedeem.set(id, { id, group, eventTime, conditionId, attempts: 0, nextAttemptAt: now });
   }
+  await saveQueue();
   logger.info(`Trading: ${group} trade on ${eventTime}: ${finalOutcome}, ${result}`);
 
   const state = trading.groups[group];
-  if (state.openTrade?.id !== id) return; // a trade from before a restart of this group: only its record changes
+  if (state.openTrade?.id !== id) return; // a trade from an earlier start of this group: only its record changes
 
   state.lastResult = { eventTime, step: state.openTrade.step, outcome: finalOutcome, result };
   state.openTrade = null;
@@ -350,7 +419,7 @@ async function resolveTrade({ id, group, eventTime, orderId, conditionId }, now)
 
   if (state.step > STEPS.length) {
     stopGroup(group, `Lost at the last step (${STEPS.length})`);
-    state.step = 1;
+    state.step = null;
     logger.warn(`Trading: ${group} lost at the last step, stopped`);
   } else if (state.active) {
     state.nextEventTime = nextEventFor(group, now);
@@ -369,6 +438,7 @@ async function redeemWinnings(item, now) {
   try {
     const transactionHash = await polymarketTrading.redeem(item.conditionId);
     trading.toRedeem.delete(item.id);
+    await saveQueue();
     await updateTrade(item.id, { redeemedAt: new Date().toISOString(), redeemTx: transactionHash });
     logger.info(`Trading: redeemed the winnings of the ${item.group} trade on ${item.eventTime}`);
   } catch (err) {
@@ -378,6 +448,7 @@ async function redeemWinnings(item, now) {
       return;
     }
     trading.toRedeem.delete(item.id);
+    await saveQueue();
     logger.error({ err }, `Trading: could not redeem the ${item.eventTime} winnings`);
     await updateTrade(item.id, { redeemError: err.message });
     trading.groups[item.group].lastError = errorAt(
@@ -422,12 +493,12 @@ async function tick() {
   }
 }
 
-// ── Start / stop ───────────────────────────────────────────────────────────────────────────────
+// ── Start / stop / restart ─────────────────────────────────────────────────────────────────────
 
 /**
- * Starts trading a group at step 1. The event in progress is skipped: the first trade is on the group's next
- * event. Live, first checks that Polymarket allows trading from here and that the account connects. Throws a 409
- * if the group is already trading.
+ * Starts trading a group. Its starting step comes from its latest results (see chooseStartStep), and its first
+ * order is on its next event (the one in progress is skipped). Live, first checks that Polymarket allows trading
+ * from here and that the account connects. Throws a 409 if the group is already trading.
  */
 export async function startTrading(group) {
   const state = trading.groups[group];
@@ -444,7 +515,8 @@ export async function startTrading(group) {
   }
   trading.clockOffsetSeconds = serverTime - Date.now() / 1000;
 
-  // A trade from an earlier run that bought something keeps being checked, but no longer moves this group's steps.
+  // A trade from an earlier start that bought something keeps being checked, but no longer moves this group's
+  // steps.
   trading.runs += 1;
   Object.assign(state, newGroupState(), {
     active: true,
@@ -492,32 +564,96 @@ export function getStatus() {
 }
 
 /**
- * On server start: trading doesn't survive a restart, so groups that Firebase still shows as trading are marked
- * stopped. A trade they left open is handled like a stop: cancelled while still possible, otherwise its result is
- * still recorded.
+ * On server shutdown: pauses the trading loop without stopping trading, after letting a tick in progress finish
+ * (for up to 8 seconds). Everything is already saved, so the next start continues from here.
  */
-export async function markStoppedOnStartup() {
-  const saved = (await firebase.get(STATE)) ?? {};
-  const now = Date.now() / 1000;
-  for (const group of GROUPS.filter((name) => saved[name]?.active || saved[name]?.openTrade)) {
-    const { active, openTrade: open } = saved[group];
-    const cancelled = open && canCancel(open, now) ? await cancelTrade(open, 'Server restarted') : false;
-    if (open && !cancelled) {
-      const { id, eventTime, orderId } = open;
-      trading.unresolved.set(id, { id, group, eventTime, orderId });
-      trading.timer ??= setInterval(tick, TICK_MS);
-    }
-    await firebase.patch(`${STATE}/${group}`, {
-      active: false,
-      current: null,
-      ifLost: null,
-      nextEventTime: null,
-      openTrade: null,
-      ...(active && { stoppedAt: new Date().toISOString(), stoppedReason: 'Server restarted' }),
-      updatedAt: new Date().toISOString(),
+export async function pauseTrading() {
+  stopLoop();
+  const deadline = performance.now() + PAUSE_WAIT_MS;
+  while (trading.busy && performance.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+/**
+ * Live, after a restart: the group's state says an order was being sent when the server stopped. If its trade was
+ * recorded as placed, it's simply the open trade. If it's still "placing", it's unclear whether it reached
+ * Polymarket: it's marked "unconfirmed" and the group stops, to be checked on polymarket.com.
+ */
+async function recoverPlacingOrder(group, tradeId) {
+  const state = trading.groups[group];
+  const trade = await database.findById(TRADES, tradeId);
+  if (trade?.status === TRADE_STATUS.OPEN && trade.orderId) {
+    await trackTrade(group, trade, trade.step, STEPS[trade.step - 1]);
+    state.nextEventTime = null;
+  } else if (trade?.status === TRADE_STATUS.PLACING) {
+    await updateTrade(tradeId, {
+      status: TRADE_STATUS.UNCONFIRMED,
+      error: 'The server stopped while this order was being sent',
     });
-    logger.info(
-      `Trading: ${group} marked stopped after the restart${open ? `, open trade on ${open.eventTime} handled` : ''}`,
+    stopGroup(
+      group,
+      'The server stopped while an order was being sent: check polymarket.com before starting again',
     );
+    state.lastError = errorAt(
+      `Order on the ${trade.eventTime} event unconfirmed (server stopped while sending)`,
+    );
+  }
+  // "failed" or "unconfirmed": already handled before the restart
+}
+
+/**
+ * On server start: continues trading where it was. Each group that was trading goes on with its own step, open
+ * trade and next event, as its previous trades decided (not recomputed from the latest results); if the open
+ * trade's result or its next event passed while the server was down, the loop catches up on its first tick.
+ * Trades waiting for their result and winnings to redeem are picked up again.
+ */
+export async function resumeOnStartup() {
+  const [saved, queue] = await Promise.all([firebase.get(STATE), firebase.get(QUEUE)]);
+  try {
+    trading.clockOffsetSeconds = (await polymarketService.getServerTime()) - Date.now() / 1000;
+  } catch (err) {
+    logger.warn({ err }, "Trading: couldn't get Polymarket's time, using this computer's clock");
+  }
+  const now = polymarketNow();
+  for (const item of Object.values(queue?.unresolved ?? {})) trading.unresolved.set(item.id, item);
+  for (const item of Object.values(queue?.redeem ?? {})) {
+    trading.toRedeem.set(item.id, { ...item, nextAttemptAt: now });
+  }
+
+  for (const group of GROUPS.filter((name) => saved?.[name])) {
+    const previous = saved[group];
+    const state = trading.groups[group];
+    Object.assign(state, newGroupState());
+    for (const key of Object.keys(state)) if (previous[key] !== undefined) state[key] = previous[key];
+    state.placingTradeId = null;
+
+    const open = state.openTrade;
+    if (open && !trading.unresolved.has(open.id)) {
+      trading.unresolved.set(open.id, {
+        id: open.id,
+        group,
+        eventTime: open.eventTime,
+        orderId: open.orderId,
+        conditionId: open.conditionId,
+      });
+    }
+    if (previous.placingTradeId) await recoverPlacingOrder(group, previous.placingTradeId);
+    if (state.active) {
+      trading.runs += 1;
+      state.run = trading.runs;
+      state.resumedAt = new Date().toISOString();
+      logger.info(
+        `Trading: ${group} continues after the restart at step ${state.step ?? '(being chosen)'}` +
+          (state.openTrade ? `, open trade on ${state.openTrade.eventTime}` : ''),
+      );
+    }
+    await saveState(group);
+  }
+  await saveQueue();
+
+  const anyActive = GROUPS.some((group) => trading.groups[group].active);
+  if (anyActive || trading.unresolved.size > 0 || trading.toRedeem.size > 0) {
+    trading.timer ??= setInterval(tick, TICK_MS);
   }
 }

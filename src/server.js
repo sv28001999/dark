@@ -3,7 +3,7 @@ import config from './config/index.js';
 import logger from './config/logger.js';
 import { pruneRecordsOnStartup, stopCapturing } from './services/capture.service.js';
 import { stopAllRuns } from './services/script.service.js';
-import { markStoppedOnStartup, stopAllTrading } from './services/trading.service.js';
+import { pauseTrading, resumeOnStartup } from './services/trading.service.js';
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 
@@ -28,8 +28,8 @@ const server = app.listen(config.port, (err) => {
 
 // On every start, keep only the latest 40 capture records in Firebase.
 pruneRecordsOnStartup().catch((err) => logger.error({ err }, 'Could not remove old capture records'));
-// Trading doesn't survive a restart: show it as stopped in the mobile app.
-markStoppedOnStartup().catch((err) => logger.error({ err }, 'Could not update the trading state'));
+// Continue trading where it was before the restart.
+resumeOnStartup().catch((err) => logger.error({ err }, 'Could not resume trading'));
 
 let shuttingDown = false;
 
@@ -43,12 +43,12 @@ async function shutdown(signal) {
     process.exit(1);
   }, SHUTDOWN_TIMEOUT_MS).unref();
 
-  // Stop accepting requests and let in-flight ones finish; meanwhile stop the capture loop, trading and
-  // running scripts (they get recorded as cancelled).
+  // Stop accepting requests and let in-flight ones finish; meanwhile stop the capture loop and running scripts
+  // (they get recorded as cancelled). Trading is only paused: it continues when the server starts again.
   await Promise.all([
     new Promise((resolve) => server.close(resolve)),
     stopCapturing(),
-    stopAllTrading('Server stopped').catch((err) => logger.error({ err }, 'Could not stop trading')),
+    pauseTrading(),
     stopAllRuns(),
   ]);
   logger.info('Shutdown complete');

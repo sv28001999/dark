@@ -202,24 +202,28 @@ unavailable). `quantity` is set for limit orders only. `status` is `open`, then 
 `cancelReason`). Live trades have more fields and statuses, below.
 
 Odd and even are traded separately, each on its own events. **`POST /api/v1/trading/odd/start`** (or `even`)
-skips the event in progress, picks the group's next event and places the first order right away. Then:
+skips the event in progress and picks the group's next event. Its **starting step comes from the group's latest
+results**, as if it had been trading all along: one more than the number of UP results its latest events ended
+with (odd ended D, U, U, U → step 4; latest DOWN → step 1), up to step 10; events without a clear result are
+skipped. If the group's newest event has no result yet, it waits for it (the next event starts later). The first
+order is placed as soon as the step is known (`startedFrom: { step, upStreak }`). Then:
 
 1. The order buys the DOWN side of its event, ahead of the event's start, with the current step's order (table
    below).
-2. 2 minutes after the event ends, its outcome is checked (again every 5 seconds until Polymarket has it).
+2. 1 minute after the event ends, its outcome is checked (again every 5 seconds until Polymarket has it).
 3. DOWN: the trade won, the next trade is step 1. UP: it lost, the next trade is the next step. No outcome 15
    minutes after the end: `unknown`, the same step again.
 4. As soon as the outcome is known, the next order is placed, on the group's first event that hasn't started yet.
 
-| Step | Order                                                                 |
-| ---- | --------------------------------------------------------------------- |
-| 1    | $1 market                                                             |
-| 2    | $1.50 market                                                          |
-| 3    | $2.94 limit: 6 shares at $0.49                                        |
-| 4–10 | limit at $0.49: 12, 24, 48, 96, 192, 384, 768 shares ($6, $12 … $384) |
+| Step | Order                                                           |
+| ---- | --------------------------------------------------------------- |
+| 1    | $1 market                                                       |
+| 2    | $1.50 market                                                    |
+| 3    | $2.94 limit: 6 shares at $0.49                                  |
+| 4–6  | limit at $0.49: 12, 24, 48 shares ($6, $12, $24)                |
+| 7–10 | limit at $0.50: 96, 192, 384, 768 shares ($48, $96, $192, $384) |
 
-Losing step 10 stops trading for the group. Starting again begins at step 1. Starting a group that is already
-trading returns `409`. An order is placed at most 1 minute after its event starts; if the server was busy or asleep
+Losing step 10 stops trading for the group. Starting a group that is already trading returns `409`. An order is placed at most 1 minute after its event starts; if the server was busy or asleep
 past that, the event is skipped.
 
 **Failures are retried.** Every Polymarket request is retried up to 5 times (waiting 1, 2, 3 and 4 seconds) when it
@@ -232,13 +236,21 @@ orders. An open order whose event hasn't started is cancelled; one whose event i
 outcome is recorded. An order that was being placed at the moment of the stop is cancelled too.
 **`GET /api/v1/trading/status`** returns each group's state and the step table.
 
-Each group's state is kept in Firebase at `trading/{odd|even}` for the mobile app: `{ active, current, ifLost,
-nextEventTime, openTrade, lastResult, lastError, startedAt, stoppedAt, stoppedReason }`, where `current` is the open
-or next trade's step and order, and `ifLost` the step after a loss (both `null` when stopped).
+Each group's state is kept in Firebase at `trading/{odd|even}`, for the mobile app and for restarts: `{ active,
+step, current, ifLost, nextEventTime, openTrade, placingTradeId, lastResult, lastError, startedFrom, resumedAt,
+startedAt, stoppedAt, stoppedReason }`, where `current` is the open or next trade's step and order, and `ifLost`
+the step after a loss (both `null` when stopped, or while the starting step is being chosen). Pending work is kept
+at `tradingQueue`: trades waiting for their result (`unresolved`) and winnings to redeem (`redeem`).
 
-Like capture, trading runs inside the server and stops when it restarts: on startup, groups still shown as trading
-are marked stopped ("Server restarted"), and their open orders are handled like a stop. **`npm run dev` restarts the
-server whenever a source file is saved**, so use `npm start` while trading.
+**Trading continues across server restarts.** Stopping the server only pauses it (after letting a step in progress
+finish); nothing is cancelled. On startup, each group that was trading continues with its own step, open trade and
+next event, as its previous trades decided; its starting step is not chosen again (`resumedAt` is set). If the
+open trade's result or the next event's start passed while the server was down, the first loop catches up: the
+result is recorded and moves the step, and the next order goes on the group's first event that hasn't started.
+Trades waiting for their result and winnings to redeem are picked up too. Live, if the server stopped while an
+order was being sent (`placingTradeId`) and its trade is still `placing`, it's unclear whether it was placed: it's
+marked `unconfirmed` and the group stops, to be checked on polymarket.com. **`npm run dev` restarts the server
+whenever a source file is saved**; use `npm start` while trading.
 
 All trading endpoints require the `X-Api-Key` header to equal `TRADING_API_KEY`, when it is set (always, in live
 mode); otherwise they answer `401`.
