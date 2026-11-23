@@ -6,8 +6,9 @@ A layered REST API built with **Node.js and Express 5**, written in plain JavaSc
   (UP/DOWN) in Firebase, split into an odd and an even group, and reports streaks.
 - **Runs scripts**: you put Node.js scripts in `scripts/`, and the API runs them in the background and records
   their status and output.
-- **Trading (simulated)**: buys the DOWN side of odd or even events following a step ladder (bigger after a loss,
-  back to $1 after a win). For now nothing is sent to Polymarket: each buy is saved as a trade in Firebase.
+- **Trading**: buys the DOWN side of odd or even events following a step ladder (bigger after a loss, back to $1
+  after a win). Simulated by default (each buy is only saved as a trade in Firebase); with `TRADING_MODE=live` it
+  places real orders on Polymarket with real money.
 - **Push notifications**: sends notifications to the mobile app through Firebase Cloud Messaging (FCM), including
   an alert to every registered device when the odd or even group has a set number of UP outcomes in a row. Needs
   `FIREBASE_SERVICE_ACCOUNT`; without it, notifications are only written to the server log.
@@ -15,7 +16,8 @@ A layered REST API built with **Node.js and Express 5**, written in plain JavaSc
 > **Storage**: everything is stored in a Firebase Realtime Database, accessed through its public URL (REST API,
 > no credentials). That means the database rules allow anyone with the URL to read and write it.
 
-> **There is no authentication.** Anyone who can reach the server can run your scripts. Keep it on `localhost` or a
+> **Only the trading endpoints are protected**, by `TRADING_API_KEY` (required for live trading). Anyone who can
+> reach the server can use the other endpoints, including running your scripts. Keep it on `localhost` or a
 > private network, or put it behind something that restricts access.
 
 ## Project structure
@@ -47,7 +49,8 @@ A layered REST API built with **Node.js and Express 5**, written in plain JavaSc
 │   ├── services/                # Business logic (no req/res here)
 │   │   ├── capture.service.js       # BTC Up/Down capture loop, odd/even records, streaks, UP streak alerts
 │   │   ├── btcEvent.service.js      # BTC Up/Down 5m events: timing, odd/even, outcomes, DOWN price
-│   │   ├── trading.service.js       # Simulated trading loop: odd/even, step ladder, trades
+│   │   ├── trading.service.js       # Trading loop: odd/even, step ladder, trades (simulated or live)
+│   │   ├── polymarketTrading.service.js # Live orders on Polymarket (@polymarket/client SDK)
 │   │   ├── polymarket.service.js    # Calls to the Polymarket APIs
 │   │   ├── script.service.js        # Starts/cancels script processes, records results
 │   │   ├── notification.service.js  # Sends push notifications through FCM and records them
@@ -112,8 +115,8 @@ npm run dev             # starts with auto-reload on http://localhost:3000
 | POST   | `/api/v1/devices`                       | Register a device's push token (called by the mobile app)     |
 | GET    | `/api/v1/settings`                      | Settings, e.g. `upStreakAlert`                                |
 | PATCH  | `/api/v1/settings`                      | Change settings                                               |
-| POST   | `/api/v1/trading/odd/start`             | Start trading odd events (simulated)                          |
-| POST   | `/api/v1/trading/even/start`            | Start trading even events (simulated)                         |
+| POST   | `/api/v1/trading/odd/start`             | Start trading odd events                                      |
+| POST   | `/api/v1/trading/even/start`            | Start trading even events                                     |
 | POST   | `/api/v1/trading/odd/stop`              | Stop trading odd events                                       |
 | POST   | `/api/v1/trading/even/stop`             | Stop trading even events                                      |
 | POST   | `/api/v1/trading/stop`                  | Stop all trading                                              |
@@ -183,14 +186,20 @@ settings and returns all of them. Settings that no longer exist (such as the old
 - `upStreakAlert` (1–20, default 2): how many UP outcomes in a row trigger an UP streak alert. It is read on
   every check, so a change applies from the next outcome.
 
-### Trading (simulated)
+### Trading
 
-**Nothing is sent to Polymarket yet.** Each buy is saved as a trade in Firebase at `trades/<id>`:
-`{ group, eventTime, slug, side: "DOWN", orderType, amount, price, quantity, step, epoch, placedAt, status,
-outcome, resolvedAt, simulated: true }`. `epoch` is when it was placed (Unix seconds). `price` is the limit price,
-or for a market order the DOWN side's price on Polymarket at that moment (`null` if unavailable). `quantity` is set
-for limit orders only. `status` is `open`, then `won` (the event ended DOWN), `lost` (UP) or `unknown`, or
-`cancelled` (trading stopped before its event started: nothing bought, with `cancelledAt` and `cancelReason`).
+`TRADING_MODE` decides what a buy does:
+
+- `simulated` (default): **nothing is sent to Polymarket**; each buy is only saved as a trade.
+- `live`: **real orders on Polymarket with real money**, from the account in `POLYMARKET_PRIVATE_KEY` and
+  `POLYMARKET_WALLET_ADDRESS` (see [Live trading](#live-trading)).
+
+Each trade is saved in Firebase at `trades/<id>`: `{ group, eventTime, slug, side: "DOWN", orderType, amount, price,
+quantity, step, epoch, placedAt, status, outcome, resolvedAt, simulated }`. `epoch` is when it was placed (Unix
+seconds). `price` is the limit price, or for a market order the DOWN side's price at that moment (`null` if
+unavailable). `quantity` is set for limit orders only. `status` is `open`, then `won` (the event ended DOWN), `lost`
+(UP) or `unknown`, or `cancelled` (trading stopped before anything was bought, with `cancelledAt` and
+`cancelReason`). Live trades have more fields and statuses, below.
 
 Odd and even are traded separately, each on its own events. **`POST /api/v1/trading/odd/start`** (or `even`)
 skips the event in progress, picks the group's next event and places the first order right away. Then:
@@ -230,6 +239,34 @@ or next trade's step and order, and `ifLost` the step after a loss (both `null` 
 Like capture, trading runs inside the server and stops when it restarts: on startup, groups still shown as trading
 are marked stopped ("Server restarted"), and their open orders are handled like a stop. **`npm run dev` restarts the
 server whenever a source file is saved**, so use `npm start` while trading.
+
+All trading endpoints require the `X-Api-Key` header to equal `TRADING_API_KEY`, when it is set (always, in live
+mode); otherwise they answer `401`.
+
+#### Live trading
+
+Set `TRADING_MODE=live`, `TRADING_API_KEY`, `POLYMARKET_PRIVATE_KEY` and `POLYMARKET_WALLET_ADDRESS` (see
+[.env.example](.env.example)); the server refuses to start if one is missing. The private key controls the
+account's funds: keep it only in `.env` (gitignored) and the host's environment settings, never in git or chat.
+Optionally set the relayer API key pair, used for gasless transactions such as redeeming winnings.
+
+Before a group starts, the server checks that Polymarket doesn't block trading from its location
+(`polymarket.com/api/geoblock`, `403` if it does) and connects to the account. Then, for each trade:
+
+- **Market orders** (steps 1–2) are fill-or-kill for the step's USD amount (Polymarket's taker fee is added on top),
+  at most at the price the current asks give for that amount: either all of it is bought, or nothing.
+- **Limit orders** (steps 3–10) rest on the book until the event ends (good-till-date), then expire. Whatever filled
+  counts as the trade.
+- The trade's result uses the shares its order actually bought (`filledShares`): an order that bought nothing is
+  `unfilled`, and the same step is tried on the next event.
+- A won trade's winnings are **redeemed** for USDC automatically (`redeemedAt`, `redeemTx`), retried 1, 2, 4 and 8
+  minutes after a failure; after that, claim them on polymarket.com (the app shows the error).
+- Each trade is saved **before** its order is sent (`placing`), with `orderId`, `orderStatus`, `assetId` and
+  `conditionId` once placed. A rejected order is saved as `failed` and retried (up to 5 times). An order whose
+  sending failed in a way that leaves unclear whether it was placed (connection lost, timeout) is `unconfirmed`:
+  it is **never retried** (it could buy twice), and trading stops for the group until you check polymarket.com.
+- Stopping cancels the open order on Polymarket. Shares already bought (a market order, or a partly filled limit
+  order) can't be undone: that trade stays open until its result.
 
 ### Push notifications
 

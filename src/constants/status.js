@@ -15,13 +15,17 @@ export const NOTIFICATION_STATUS = Object.freeze({
   LOGGED: 'logged',
 });
 
-/** A (simulated) trade on an event's DOWN side. */
+/** A trade on an event's DOWN side. */
 export const TRADE_STATUS = Object.freeze({
+  PLACING: 'placing', // live: saved, the order is being sent to Polymarket
   OPEN: 'open', // placed, waiting for the event's outcome
   WON: 'won', // the event ended DOWN
   LOST: 'lost', // the event ended UP
   UNKNOWN: 'unknown', // no clear outcome 15 minutes after the event ended
-  CANCELLED: 'cancelled', // trading stopped before its event started: nothing bought
+  UNFILLED: 'unfilled', // live: the order bought nothing (a limit order that never filled)
+  CANCELLED: 'cancelled', // trading stopped before anything was bought
+  FAILED: 'failed', // live: Polymarket rejected the order (another attempt may follow)
+  UNCONFIRMED: 'unconfirmed', // live: sending the order failed in a way that leaves unclear whether it was placed
 });
 
 export const ORDER_TYPE = Object.freeze({

@@ -12,7 +12,8 @@ export function getStatus(_req, res) {
 export async function startTrading(req, res) {
   const { params } = validateRequest(req, tradingValidation.groupParams);
   const data = await tradingService.startTrading(params.group);
-  sendSuccess(res, { message: `${groupName(params.group)} trading started (simulated)`, data });
+  const mode = data.mode === 'live' ? 'LIVE: real orders' : 'simulated';
+  sendSuccess(res, { message: `${groupName(params.group)} trading started (${mode})`, data });
 }
 
 export async function stopTrading(req, res) {
