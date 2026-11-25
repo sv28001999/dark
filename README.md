@@ -282,7 +282,7 @@ Before a group starts, the server checks that Polymarket doesn't block trading f
 
 ### Push notifications
 
-Notifications are sent through Firebase Cloud Messaging (FCM), to the Android notification channel `alerts`
+Notifications are sent through Firebase Cloud Messaging (FCM), to the Android notification channel `alerts_chime` (with the app's custom sound)
 that the mobile app creates. To enable sending:
 
 1. In the Firebase console, open **Project settings → Service accounts → Generate new private key**.

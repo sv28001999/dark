@@ -8,8 +8,10 @@ import * as deviceService from './device.service.js';
 const NOTIFICATIONS = 'notifications'; // database collection
 
 // The Android notification channel the mobile app creates (same id there). Its settings, such as showing
-// notifications as heads-up banners, apply to these notifications.
-const ANDROID_CHANNEL_ID = 'alerts';
+// notifications as heads-up banners and its custom sound, apply to these notifications.
+const ANDROID_CHANNEL_ID = 'alerts_chime';
+// The app's bundled sound (res/raw/alert_chime), for Android versions without channels (before 8).
+const ANDROID_SOUND = 'alert_chime';
 
 /** The FCM message for one target: { token } or { topic }. */
 function fcmMessage(target, { title, body, imageUrl, data }) {
@@ -18,7 +20,7 @@ function fcmMessage(target, { title, body, imageUrl, data }) {
     notification: { title, body, ...(imageUrl && { image: imageUrl }) },
     ...(data && { data }),
     // High priority: delivered right away, also when the app is closed or the phone is idle.
-    android: { priority: 'high', notification: { channel_id: ANDROID_CHANNEL_ID } },
+    android: { priority: 'high', notification: { channel_id: ANDROID_CHANNEL_ID, sound: ANDROID_SOUND } },
   };
 }
 
